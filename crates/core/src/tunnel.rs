@@ -22,8 +22,8 @@ impl client::Handler for Handler {
     type Error = russh::Error;
 
     async fn check_server_key(&mut self, key: &PublicKeyOrCertificate) -> Result<bool, Self::Error> {
-        // Trust-on-first-use against ~/.ssh/known_hosts: unknown hosts are accepted, but a key
-        // that contradicts a recorded one is rejected (possible MITM).
+        // Checked against ~/.ssh/known_hosts: unknown hosts are accepted (and not recorded), but
+        // a key that contradicts a recorded one is rejected (possible MITM).
         if let PublicKeyOrCertificate::PublicKey { key, .. } = key
             && let Err(e) = russh::keys::check_known_hosts(&self.host, self.port, key)
         {

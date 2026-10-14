@@ -620,7 +620,7 @@ impl TablePlusApp {
                 if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                     submit = true;
                 }
-                ui.checkbox(&mut prompt.remember, "Save password in keychain");
+                ui.checkbox(&mut prompt.remember, crate::util::SAVE_PASSWORD_LABEL);
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     if widgets::primary_button(ui, "Connect").clicked() {

@@ -82,6 +82,8 @@ pub struct GridState {
     anchor: Option<usize>,
     pub editing: Option<CellEditor>,
     scroll_to_focus: bool,
+    /// Id egui assigned to the body scroll area (known after the first frame).
+    scroll_id: Option<Id>,
     menu_cell: Option<(usize, usize)>,
 }
 
@@ -328,13 +330,17 @@ pub fn show(ui: &mut Ui, id: Id, state: &mut GridState, data: &dyn GridData) -> 
         .id_salt(id.with("scroll"))
         .auto_shrink([false, false])
         .scroll_source(ScrollSource::SCROLL_BAR | ScrollSource::MOUSE_WHEEL);
-    // Keep the focused cell visible after keyboard navigation.
-    if std::mem::take(&mut state.scroll_to_focus)
+    // Keep the focused cell visible after keyboard navigation or when a row is added.
+    if state.focus.is_none() {
+        state.scroll_to_focus = false;
+    }
+    if state.scroll_to_focus
         && let Some((r, c)) = state.focus
+        && let Some(st) = state.scroll_id.and_then(|sid| egui::scroll_area::State::load(ui.ctx(), sid))
     {
+        state.scroll_to_focus = false;
         let viewport = ui.available_size();
-        let st = egui::scroll_area::State::load(ui.ctx(), ui.make_persistent_id(id.with("scroll")));
-        if let Some(st) = st {
+        {
             let mut off = st.offset;
             let top = r as f32 * ROW_H;
             let bottom = top + ROW_H + HEADER_H;
@@ -356,7 +362,7 @@ pub fn show(ui: &mut Ui, id: Id, state: &mut GridState, data: &dyn GridData) -> 
         }
     }
 
-    scroll.show_viewport(ui, |ui, viewport| {
+    let output = scroll.show_viewport(ui, |ui, viewport| {
         let content_h = total_h.max(viewport.height());
         ui.set_min_size(vec2(total_w.max(viewport.width()), content_h));
         let origin = ui.max_rect().min;
@@ -802,6 +808,7 @@ pub fn show(ui: &mut Ui, id: Id, state: &mut GridState, data: &dyn GridData) -> 
             }
         });
     });
+    state.scroll_id = Some(output.id);
     events
 }
 

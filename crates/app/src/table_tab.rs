@@ -429,17 +429,19 @@ impl TableTab {
         }
 
         if let Some(stmts) = self.preview.clone() {
+            let dialect = ctx.dialect;
             let mut close = false;
             let mut run = false;
             crate::widgets::modal(ui.ctx(), ("commit_preview", &self.object)).show(ui.ctx(), |ui| {
                 ui.set_width(640.0);
                 ui.heading("Review changes");
-                ui.label(widgets::muted(ui, format!("{} statement(s) will run in one transaction.", stmts.len())));
+                ui.label(widgets::muted(
+                    ui,
+                    format!("{} will run in one transaction.", widgets::plural(stmts.len() as u64, "statement")),
+                ));
                 ui.add_space(6.0);
-                let mut text = stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n");
-                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                    ui.add(TextEdit::multiline(&mut text).code_editor().desired_width(f32::INFINITY).interactive(true));
-                });
+                let text = stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n");
+                widgets::sql_view(ui, &text, dialect, 320.0);
                 if let Some(e) = &self.commit_error {
                     ui.colored_label(palette(ui).danger, e);
                 }

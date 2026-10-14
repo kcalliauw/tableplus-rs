@@ -177,7 +177,7 @@ impl ExportDialog {
                     format!("{} rows from the current result", fmt_count(rows.len() as u64))
                 }
                 ExportSource::Table { where_clause: Some(_), .. } => "All rows matching the current filter".to_string(),
-                ExportSource::Table { .. } => "All rows of the table (streamed in pages)".to_string(),
+                ExportSource::Table { .. } => "All rows of the table (streamed from the server)".to_string(),
             };
             ui.label(widgets::muted(ui, what));
             ui.add_space(10.0);
@@ -194,6 +194,7 @@ impl ExportDialog {
                 ExportFormat::Csv => {
                     ui.horizontal(|ui| {
                         ui.checkbox(&mut self.include_header, "Header row");
+                        ui.add_space(16.0);
                         ui.label("Delimiter");
                         for (d, label) in [(b',', "Comma"), (b';', "Semicolon"), (b'\t', "Tab")] {
                             ui.selectable_value(&mut self.delimiter, d, label);

@@ -160,9 +160,33 @@ pub struct CompletionResult {
     pub missing_columns: Vec<(String, String)>,
 }
 
+/// Whether `cursor` sits inside a comment or an unterminated string literal, where
+/// identifier completion would only get in the way.
+pub fn in_comment_or_string(src: &str, cursor: usize, dialect: Dialect) -> bool {
+    let cursor = cursor.min(src.len());
+    let before = &src[..cursor];
+    let Some(last) = tokenize(before, dialect).pop() else {
+        return false;
+    };
+    let text = last.text(before);
+    match last.kind {
+        TokenKind::Comment => {
+            text.starts_with("--") || text.starts_with('#') || !text.ends_with("*/") || text.len() < 4
+        }
+        TokenKind::String => {
+            let quote = text.chars().find(|c| *c == '\'' || *c == '"' || *c == '$');
+            text.len() < 2 || quote.is_none_or(|q| !text.ends_with(q))
+        }
+        _ => false,
+    }
+}
+
 /// Computes suggestions for the cursor position in `src`.
 pub fn complete(src: &str, cursor: usize, dialect: Dialect, catalog: &dyn Catalog) -> CompletionResult {
     let ctx = context_at(src, cursor, dialect);
+    if in_comment_or_string(src, cursor, dialect) {
+        return CompletionResult { context: ctx, suggestions: Vec::new(), missing_columns: Vec::new() };
+    }
     let stmt = statement_at(src, cursor, dialect).map(|s| s.text(src).to_string()).unwrap_or_default();
     let refs = referenced_tables(&stmt, dialect);
     let mut candidates: Vec<Suggestion> = Vec::new();
@@ -288,7 +312,8 @@ pub fn complete(src: &str, cursor: usize, dialect: Dialect, catalog: &dyn Catalo
                 SuggestionKind::Function => 5,
                 SuggestionKind::Keyword => 0,
             };
-            Some((score + kind_bonus + if prefix_hit { 2000 } else { 0 }, s))
+            let exact = if !prefix.is_empty() && s.label.eq_ignore_ascii_case(prefix) { 5000 } else { 0 };
+            Some((score + kind_bonus + exact + if prefix_hit { 2000 } else { 0 }, s))
         })
         .collect();
     scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.label.cmp(&b.1.label)));
@@ -404,5 +429,29 @@ mod tests {
         assert_eq!(quote_if_needed(Dialect::Postgres, "Users"), "\"Users\"");
         assert_eq!(quote_if_needed(Dialect::MySql, "Users"), "Users");
         assert_eq!(quote_if_needed(Dialect::MySql, "order"), "`order`");
+    }
+
+    #[test]
+    fn no_suggestions_in_comments_or_strings() {
+        let c = cat();
+        let pg = Dialect::Postgres;
+        for src in ["-- recent ord", "select 1 /* ord", "select * from users where name = 'ord", "# ord"] {
+            let d = if src.starts_with('#') { Dialect::MySql } else { pg };
+            assert!(complete(src, src.len(), d, &c).suggestions.is_empty(), "{src}");
+        }
+        for src in ["/* done */ select * from ord", "select 'x', ord", "-- note\nselect * from ord"] {
+            assert!(!complete(src, src.len(), pg, &c).suggestions.is_empty(), "{src}");
+        }
+    }
+
+    #[test]
+    fn exact_match_ranks_first() {
+        let c = cat();
+        let src = "select * from order";
+        let r = complete(src, src.len(), Dialect::Postgres, &c);
+        assert_eq!(r.suggestions.first().map(|s| s.label.as_str()), Some("orders"));
+        let src = "select * from orders";
+        let r = complete(src, src.len(), Dialect::Postgres, &c);
+        assert_eq!(r.suggestions.first().map(|s| s.label.as_str()), Some("orders"));
     }
 }

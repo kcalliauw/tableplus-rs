@@ -198,7 +198,7 @@ impl GridData for TableData<'_> {
                 Some(CellEdit::Text(t)) => CellView {
                     text: Cow::Owned(single_line(&t)),
                     null: false,
-                    numeric: false,
+                    numeric: self.columns[col].is_numeric(),
                     state: CellState::Inserted,
                     placeholder: false,
                 },
@@ -223,7 +223,7 @@ impl GridData for TableData<'_> {
                 CellEdit::Text(t) => CellView {
                     text: Cow::Owned(single_line(t)),
                     null: false,
-                    numeric: false,
+                    numeric: self.columns[col].is_numeric(),
                     state: CellState::Modified,
                     placeholder: false,
                 },

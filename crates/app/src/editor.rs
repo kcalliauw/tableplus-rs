@@ -101,6 +101,14 @@ impl CodeEditor {
         // Keys for the completion popup are consumed before the text edit sees them.
         if let Some(popup) = &mut self.popup {
             let n = popup.items.len();
+            // Enter on a word that already matches the suggestion starts a new line instead.
+            let typed = text.get(popup.replace_start..popup.cursor.min(text.len())).unwrap_or("");
+            let complete_word = tableplus_core::sqltext::is_keyword(typed)
+                || popup
+                    .items
+                    .iter()
+                    .any(|s| s.insert.eq_ignore_ascii_case(typed) || s.label.eq_ignore_ascii_case(typed));
+            let mut close = false;
             ui.input_mut(|i| {
                 if i.consume_key(Modifiers::NONE, Key::ArrowDown) {
                     popup.selected = (popup.selected + 1) % n;
@@ -108,11 +116,18 @@ impl CodeEditor {
                 if i.consume_key(Modifiers::NONE, Key::ArrowUp) {
                     popup.selected = (popup.selected + n - 1) % n;
                 }
-                if i.consume_key(Modifiers::NONE, Key::Enter) || i.consume_key(Modifiers::NONE, Key::Tab) {
+                if i.consume_key(Modifiers::NONE, Key::Tab)
+                    || (!complete_word && i.consume_key(Modifiers::NONE, Key::Enter))
+                {
                     accept = popup.items.get(popup.selected).cloned();
+                } else if i.key_pressed(Key::Enter) {
+                    close = true;
+                }
+                if i.consume_key(Modifiers::NONE, Key::Escape) {
+                    close = true;
                 }
             });
-            if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+            if close {
                 self.popup = None;
             }
         }
@@ -218,7 +233,10 @@ impl CodeEditor {
                         }
                         missing = res.missing_columns;
                         let show = !res.suggestions.is_empty()
-                            && (force_complete || !res.context.prefix.is_empty() || res.context.qualifier.is_some());
+                            && (force_complete
+                                || res.context.qualifier.is_some()
+                                || (self.popup.is_some() && !res.context.prefix.is_empty())
+                                || res.context.prefix.chars().count() >= 2);
                         if show {
                             let cpos = output.galley.pos_from_cursor(range.primary);
                             let anchor = output.galley_pos + cpos.left_bottom().to_vec2() + vec2(0.0, 2.0);

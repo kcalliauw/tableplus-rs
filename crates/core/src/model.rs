@@ -144,6 +144,36 @@ impl ColumnMeta {
     pub fn new(name: impl Into<String>, type_name: impl Into<String>) -> Self {
         Self { name: name.into(), type_name: type_name.into() }
     }
+
+    /// Whether the declared type is a number type (used to right-align values the user typed).
+    pub fn is_numeric(&self) -> bool {
+        let t = self.type_name.to_ascii_lowercase();
+        let base = t.split(|c: char| c == '(' || c.is_whitespace()).next().unwrap_or("");
+        matches!(
+            base,
+            "int"
+                | "integer"
+                | "smallint"
+                | "bigint"
+                | "tinyint"
+                | "mediumint"
+                | "int2"
+                | "int4"
+                | "int8"
+                | "serial"
+                | "smallserial"
+                | "bigserial"
+                | "numeric"
+                | "decimal"
+                | "dec"
+                | "real"
+                | "double"
+                | "float"
+                | "float4"
+                | "float8"
+                | "money"
+        )
+    }
 }
 
 pub type Row = Box<[Value]>;
@@ -189,6 +219,21 @@ impl QueryOutput {
         match self.result {
             StatementResult::Rows(rs) => Some(rs),
             StatementResult::Affected(_) => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ColumnMeta;
+
+    #[test]
+    fn numeric_column_types() {
+        for t in ["integer", "BIGINT", "numeric(12,2)", "double precision", "int unsigned", "tinyint(1)", "float8"] {
+            assert!(ColumnMeta::new("c", t).is_numeric(), "{t}");
+        }
+        for t in ["text", "varchar(20)", "timestamp with time zone", "jsonb", "boolean", "interval", ""] {
+            assert!(!ColumnMeta::new("c", t).is_numeric(), "{t}");
         }
     }
 }

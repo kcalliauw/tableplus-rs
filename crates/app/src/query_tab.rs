@@ -145,12 +145,12 @@ impl QueryTab {
                             let more = if rs.truncated { " (truncated by row limit)" } else { "" };
                             format!(
                                 "{} returned{more} · {} · {short}",
-                                plural(rs.rows.len() as u64, "row"),
+                                widgets::plural(rs.rows.len() as u64, "row"),
                                 fmt_duration(out.elapsed)
                             )
                         }
                         StatementResult::Affected(n) => {
-                            format!("{} affected · {} · {short}", plural(*n, "row"), fmt_duration(out.elapsed))
+                            format!("{} affected · {} · {short}", widgets::plural(*n, "row"), fmt_duration(out.elapsed))
                         }
                     };
                     self.messages.push((false, msg));
@@ -382,10 +382,6 @@ impl QueryTab {
             }
         }
     }
-}
-
-fn plural(n: u64, noun: &str) -> String {
-    format!("{} {noun}{}", fmt_count(n), if n == 1 { "" } else { "s" })
 }
 
 fn result_tab(ui: &mut Ui, label: &str, selected: bool) -> bool {

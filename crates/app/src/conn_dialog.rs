@@ -204,7 +204,7 @@ impl ConnDialog {
                 });
                 row(ui, "Password", &mut |ui| {
                     ui.add(TextEdit::singleline(&mut self.password).password(true).desired_width(full(ui) - 150.0));
-                    ui.checkbox(&mut self.config.save_password, "Save in keychain");
+                    ui.checkbox(&mut self.config.save_password, crate::util::SAVE_PASSWORD_LABEL);
                 });
                 row(ui, "Database", &mut |ui| {
                     ui.add(

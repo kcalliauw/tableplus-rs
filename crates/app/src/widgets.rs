@@ -181,6 +181,36 @@ pub fn muted(ui: &Ui, text: impl Into<String>) -> RichText {
 }
 
 /// `1234567` → `1,234,567`.
+/// `1 row`, `2 rows`, `1,000 rows`.
+pub fn plural(n: u64, noun: &str) -> String {
+    format!("{} {noun}{}", fmt_count(n), if n == 1 { "" } else { "s" })
+}
+
+/// Read-only, syntax-highlighted SQL in a scroll area (selectable for copying).
+pub fn sql_view(ui: &mut Ui, sql: &str, dialect: tableplus_core::Dialect, max_height: f32) {
+    let mut text = sql.to_string();
+    let mut layouter = |ui: &Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
+        let job = crate::editor::highlight(ui, buf.as_str(), dialect, 12.5, wrap);
+        ui.painter().layout_job(job)
+    };
+    egui::Frame::new()
+        .fill(ui.visuals().extreme_bg_color)
+        .stroke(Stroke::new(1.0, palette(ui).border))
+        .corner_radius(CornerRadius::same(5))
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical().max_height(max_height).show(ui, |ui| {
+                ui.add(
+                    TextEdit::multiline(&mut text)
+                        .code_editor()
+                        .frame(egui::Frame::NONE)
+                        .desired_width(f32::INFINITY)
+                        .layouter(&mut layouter),
+                );
+            });
+        });
+}
+
 pub fn fmt_count(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::with_capacity(s.len() + s.len() / 3);

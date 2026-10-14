@@ -565,7 +565,11 @@ impl StructureEditor {
                     Ok(stmts) => {
                         ui.label(widgets::muted(
                             ui,
-                            format!("{} statement(s) will be executed on {}.", stmts.len(), object.qualified_name()),
+                            format!(
+                                "{} will be executed on {}.",
+                                widgets::plural(stmts.len() as u64, "statement"),
+                                object.qualified_name()
+                            ),
                         ));
                         if dialect == Dialect::MySql {
                             ui.label(
@@ -575,10 +579,8 @@ impl StructureEditor {
                             );
                         }
                         ui.add_space(6.0);
-                        let mut text = stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n\n");
-                        egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
-                            ui.add(TextEdit::multiline(&mut text).code_editor().desired_width(f32::INFINITY));
-                        });
+                        let text = stmts.iter().map(|s| format!("{s};")).collect::<Vec<_>>().join("\n\n");
+                        widgets::sql_view(ui, &text, dialect, 340.0);
                         if let Some(e) = &self.apply_error {
                             ui.colored_label(p.danger, e);
                         }

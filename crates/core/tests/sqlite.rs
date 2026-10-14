@@ -1,5 +1,7 @@
 //! Integration tests against a seeded SQLite file.
 
+#![allow(clippy::approx_constant)]
+
 mod common;
 
 use common::*;

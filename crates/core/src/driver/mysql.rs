@@ -422,10 +422,10 @@ impl Connection for MyConnection {
                     if let Some(col) = col {
                         c.columns.push(col);
                     }
-                    if kind == ConstraintKind::ForeignKey {
-                        if let (Some(fk), Some(rc)) = (fk_targets.last_mut(), r[5].clone()) {
-                            fk.2.push(rc);
-                        }
+                    if kind == ConstraintKind::ForeignKey
+                        && let (Some(fk), Some(rc)) = (fk_targets.last_mut(), r[5].clone())
+                    {
+                        fk.2.push(rc);
                     }
                 }
                 None => {

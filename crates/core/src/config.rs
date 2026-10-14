@@ -283,6 +283,89 @@ impl ConnectionConfig {
     }
 }
 
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Some(b) = std::str::from_utf8(&bytes[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(b);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+impl ConnectionConfig {
+    /// Parses `postgres://user:pass@host:5432/db?sslmode=require`, `mysql://…`, `mariadb://…`
+    /// or `sqlite:///path/to/file.db`. Returns the config and the password, if any.
+    pub fn from_url(url: &str) -> Result<(ConnectionConfig, Option<String>), String> {
+        let (scheme, rest) = url.split_once("://").ok_or("URL must look like scheme://user@host/db")?;
+        let driver = match scheme.to_ascii_lowercase().as_str() {
+            "postgres" | "postgresql" | "pg" => DriverKind::Postgres,
+            "mysql" => DriverKind::MySql,
+            "mariadb" => DriverKind::MariaDb,
+            "sqlite" | "sqlite3" | "file" => DriverKind::Sqlite,
+            other => return Err(format!("Unsupported scheme \"{other}\"")),
+        };
+        let mut c = ConnectionConfig::new(driver);
+        if driver == DriverKind::Sqlite {
+            c.path = percent_decode(rest.split('?').next().unwrap_or_default());
+            return Ok((c, None));
+        }
+        let (rest, query) = rest.split_once('?').unwrap_or((rest, ""));
+        let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+        let (userinfo, hostport) = match authority.rsplit_once('@') {
+            Some((u, h)) => (Some(u), h),
+            None => (None, authority),
+        };
+        let mut password = None;
+        if let Some(u) = userinfo {
+            let (user, pw) = u.split_once(':').unwrap_or((u, ""));
+            c.user = percent_decode(user);
+            if !pw.is_empty() {
+                password = Some(percent_decode(pw));
+            }
+        }
+        let (host, port) = if let Some(stripped) = hostport.strip_prefix('[') {
+            let (h, after) = stripped.split_once(']').ok_or("Unterminated IPv6 address")?;
+            (h.to_string(), after.strip_prefix(':'))
+        } else {
+            match hostport.rsplit_once(':') {
+                Some((h, p)) => (h.to_string(), Some(p)),
+                None => (hostport.to_string(), None),
+            }
+        };
+        if host.is_empty() {
+            return Err("Host is missing".into());
+        }
+        c.host = host;
+        if let Some(p) = port.filter(|p| !p.is_empty()) {
+            c.port = p.parse().map_err(|_| format!("Invalid port \"{p}\""))?;
+        }
+        c.database = percent_decode(path.trim_end_matches('/'));
+        for pair in query.split('&').filter(|p| !p.is_empty()) {
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            if k.eq_ignore_ascii_case("sslmode") || k.eq_ignore_ascii_case("ssl-mode") {
+                c.tls.mode = match v.to_ascii_lowercase().replace('_', "-").as_str() {
+                    "disable" | "disabled" => SslMode::Disable,
+                    "require" | "required" => SslMode::Require,
+                    "verify-ca" => SslMode::VerifyCa,
+                    "verify-full" | "verify-identity" => SslMode::VerifyFull,
+                    _ => SslMode::Prefer,
+                };
+            }
+        }
+        Ok((c, password))
+    }
+}
+
 /// Secrets supplied at connect time (resolved from the keychain or prompted).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Credentials {
@@ -294,6 +377,27 @@ pub struct Credentials {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn urls() {
+        let (c, pw) =
+            ConnectionConfig::from_url("postgres://tp:p%40ss@db.example.com:6543/shop?sslmode=require").unwrap();
+        assert_eq!(c.driver, DriverKind::Postgres);
+        assert_eq!(
+            (c.user.as_str(), c.host.as_str(), c.port, c.database.as_str()),
+            ("tp", "db.example.com", 6543, "shop")
+        );
+        assert_eq!(pw.as_deref(), Some("p@ss"));
+        assert_eq!(c.tls.mode, SslMode::Require);
+        let (c, pw) = ConnectionConfig::from_url("mysql://root@127.0.0.1/app").unwrap();
+        assert_eq!((c.driver, c.port, pw), (DriverKind::MySql, 3306, None));
+        let (c, _) = ConnectionConfig::from_url("mariadb://u:x@[::1]:3307").unwrap();
+        assert_eq!((c.host.as_str(), c.port, c.database.as_str()), ("::1", 3307, ""));
+        let (c, _) = ConnectionConfig::from_url("sqlite:///tmp/my%20db.sqlite").unwrap();
+        assert_eq!(c.path, "/tmp/my db.sqlite");
+        assert!(ConnectionConfig::from_url("redis://x").is_err());
+        assert!(ConnectionConfig::from_url("nonsense").is_err());
+    }
 
     #[test]
     fn serde_round_trip_and_defaults() {

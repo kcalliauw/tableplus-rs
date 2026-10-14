@@ -111,8 +111,7 @@ pub fn referenced_tables(sql: &str, dialect: Dialect) -> Vec<TableRef> {
             continue;
         }
         // A comma-separated list of relations may follow FROM.
-        loop {
-            let Some(first) = tokens.get(i) else { break };
+        while let Some(first) = tokens.get(i) {
             if !matches!(first.kind, TokenKind::Ident | TokenKind::QuotedIdent) {
                 break;
             }

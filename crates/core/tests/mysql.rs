@@ -1,5 +1,7 @@
 //! Integration tests against the MySQL 8.4 and MariaDB 11 containers.
 
+#![allow(clippy::approx_constant)]
+
 mod common;
 
 use std::time::Duration;

@@ -24,11 +24,11 @@ impl client::Handler for Handler {
     async fn check_server_key(&mut self, key: &PublicKeyOrCertificate) -> Result<bool, Self::Error> {
         // Trust-on-first-use against ~/.ssh/known_hosts: unknown hosts are accepted, but a key
         // that contradicts a recorded one is rejected (possible MITM).
-        if let PublicKeyOrCertificate::PublicKey { key, .. } = key {
-            if let Err(e) = russh::keys::check_known_hosts(&self.host, self.port, key) {
-                tracing::warn!("SSH host key check failed for {}: {e}", self.host);
-                return Ok(false);
-            }
+        if let PublicKeyOrCertificate::PublicKey { key, .. } = key
+            && let Err(e) = russh::keys::check_known_hosts(&self.host, self.port, key)
+        {
+            tracing::warn!("SSH host key check failed for {}: {e}", self.host);
+            return Ok(false);
         }
         Ok(true)
     }
@@ -47,10 +47,10 @@ impl Drop for SshTunnel {
 }
 
 pub fn expand_tilde(path: &str) -> std::path::PathBuf {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(rest);
-        }
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
     }
     std::path::PathBuf::from(path)
 }

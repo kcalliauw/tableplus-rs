@@ -1,5 +1,7 @@
 //! Integration tests against the PostgreSQL container (`docker/compose.yml`).
 
+#![allow(clippy::approx_constant)]
+
 mod common;
 
 use std::time::Duration;

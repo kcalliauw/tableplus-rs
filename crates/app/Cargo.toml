@@ -1,6 +1,6 @@
 [package]
 name = "tableplus"
-description = "A fast, native, low-memory database GUI for macOS"
+description = "A fast, native, low-memory database GUI"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -16,7 +16,17 @@ tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
-eframe = { version = "0.36", default-features = false, features = ["accesskit", "wgpu", "persistence"] }
-egui_extras = { version = "0.36" }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+eframe = { version = "0.36", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "glow",
+    "wgpu",
+    "persistence",
+    "wayland",
+    "x11",
+] }
 rfd = "0.17"
+dirs = "6"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

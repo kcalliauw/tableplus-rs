@@ -82,15 +82,16 @@ impl Dialect {
     /// which works for numbers, booleans, dates, enums, JSON and arrays alike. Binary columns
     /// accept `0x…` hex.
     pub fn edit_literal(self, column_type: &str, text: &str) -> String {
-        if is_binary_type(column_type) {
-            if let Some(bytes) = parse_hex(text) {
-                return self.bytes_literal(&bytes);
-            }
+        if is_binary_type(column_type)
+            && let Some(bytes) = parse_hex(text)
+        {
+            return self.bytes_literal(&bytes);
         }
-        if self == Dialect::MySql && column_type.to_ascii_lowercase().starts_with("bit") {
-            if let Ok(n) = text.trim().parse::<u64>() {
-                return n.to_string();
-            }
+        if self == Dialect::MySql
+            && column_type.to_ascii_lowercase().starts_with("bit")
+            && let Ok(n) = text.trim().parse::<u64>()
+        {
+            return n.to_string();
         }
         self.quote_str(text)
     }

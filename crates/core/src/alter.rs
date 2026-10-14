@@ -62,11 +62,9 @@ fn column_sql(dialect: Dialect, c: &ColumnDef, inline_comment: bool) -> String {
             s.push(' ');
             s.push_str(e);
         }
-        if inline_comment {
-            if let Some(cm) = c.comment.as_deref().filter(|c| !c.is_empty()) {
-                s.push_str(" COMMENT ");
-                s.push_str(&dialect.quote_str(cm));
-            }
+        if inline_comment && let Some(cm) = c.comment.as_deref().filter(|c| !c.is_empty()) {
+            s.push_str(" COMMENT ");
+            s.push_str(&dialect.quote_str(cm));
         }
     }
     s
@@ -110,10 +108,10 @@ pub fn alter_statements(
                     return Err("New columns need a name and a type".into());
                 }
                 out.push(format!("ALTER TABLE {t} ADD COLUMN {}", column_sql(dialect, c, true)));
-                if dialect == Dialect::Postgres {
-                    if let Some(cm) = c.comment.as_deref().filter(|c| !c.is_empty()) {
-                        out.push(format!("COMMENT ON COLUMN {t}.{} IS {}", q(&c.name), dialect.quote_str(cm)));
-                    }
+                if dialect == Dialect::Postgres
+                    && let Some(cm) = c.comment.as_deref().filter(|c| !c.is_empty())
+                {
+                    out.push(format!("COMMENT ON COLUMN {t}.{} IS {}", q(&c.name), dialect.quote_str(cm)));
                 }
             }
             StructureChange::DropColumn(name) => out.push(format!("ALTER TABLE {t} DROP COLUMN {}", q(name))),

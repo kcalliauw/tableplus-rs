@@ -1,0 +1,70 @@
+# Test databases for tableplus-rs.
+#   docker compose -f docker/compose.yml up -d --wait
+name: tableplus-rs
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: tp
+      POSTGRES_PASSWORD: tp_pass
+      POSTGRES_DB: shop
+    # TLS on with the image's snakeoil certificate so sslmode=require can be exercised.
+    command:
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/etc/ssl/certs/ssl-cert-snakeoil.pem
+      - -c
+      - ssl_key_file=/etc/ssl/private/ssl-cert-snakeoil.key
+    ports:
+      - "127.0.0.1:54329:5432"
+    volumes:
+      - ./seed/postgres.sql:/docker-entrypoint-initdb.d/01-seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tp -d shop && psql -U tp -d shop -tAc 'select 1 from seed_done'"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: root_pass
+      MYSQL_USER: tp
+      MYSQL_PASSWORD: tp_pass
+      MYSQL_DATABASE: shop
+    command: ["--cte-max-recursion-depth=2000000"]
+    ports:
+      - "127.0.0.1:33069:3306"
+    volumes:
+      - ./seed/mysql.sql:/docker-entrypoint-initdb.d/01-seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysql -utp -ptp_pass -h127.0.0.1 shop -e 'select 1 from seed_done' >/dev/null 2>&1"]
+      interval: 2s
+      timeout: 5s
+      retries: 90
+
+  mariadb:
+    image: mariadb:11.4
+    environment:
+      MARIADB_ROOT_PASSWORD: root_pass
+      MARIADB_USER: tp
+      MARIADB_PASSWORD: tp_pass
+      MARIADB_DATABASE: shop
+    ports:
+      - "127.0.0.1:33070:3306"
+    volumes:
+      - ./seed/mariadb.sql:/docker-entrypoint-initdb.d/01-seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb -utp -ptp_pass -h127.0.0.1 shop -e 'select 1 from seed_done' >/dev/null 2>&1"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  # Bastion host for SSH-tunnel tests: user "tunnel" / password "tunnel_pass",
+  # plus key auth with docker/sshd/test_key. It can reach "postgres" and "mysql" by name.
+  sshd:
+    build: ./sshd
+    ports:
+      - "127.0.0.1:22229:22"

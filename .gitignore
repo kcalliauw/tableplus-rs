@@ -1,0 +1,5 @@
+/target
+/testdata/*.sqlite
+/testdata/*.sqlite-*
+.DS_Store
+/dist

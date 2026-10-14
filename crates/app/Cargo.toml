@@ -1,0 +1,22 @@
+[package]
+name = "tableplus"
+description = "A fast, native, low-memory database GUI for macOS"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "tableplus-rs"
+path = "src/main.rs"
+
+[dependencies]
+tableplus-core.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+eframe = { version = "0.36", default-features = false, features = ["accesskit", "wgpu", "persistence"] }
+egui_extras = { version = "0.36" }
+rfd = "0.17"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

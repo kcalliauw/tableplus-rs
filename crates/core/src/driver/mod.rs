@@ -9,7 +9,10 @@ use async_trait::async_trait;
 
 use crate::config::{ConnectionConfig, Credentials, DriverKind};
 use crate::dialect::Dialect;
-use crate::model::{QueryOutput, SchemaObject, StatementResult, TableStructure};
+use crate::model::{ColumnMeta, QueryOutput, Row, SchemaObject, StatementResult, TableStructure};
+
+/// Receives rows in batches from [`Connection::query_batches`].
+pub type BatchSink<'a> = dyn FnMut(&[ColumnMeta], Vec<Row>) -> Result<()> + Send + 'a;
 
 pub mod mysql;
 pub mod postgres;
@@ -35,6 +38,9 @@ pub trait Connection: Send + Sync {
     async fn object_definition(&self, object: &SchemaObject) -> Result<String>;
     /// Executes one statement. Row-returning statements stop reading after `max_rows`.
     async fn query(&self, sql: &str, max_rows: Option<usize>) -> Result<StatementResult>;
+    /// Streams a row-returning statement to `sink` in batches of up to `batch` rows without
+    /// holding the whole result in memory (used by exports). Returns the number of rows.
+    async fn query_batches(&self, sql: &str, batch: usize, sink: &mut BatchSink<'_>) -> Result<u64>;
     /// Runs all statements in one transaction (rolled back on the first error) and returns
     /// the total number of affected rows.
     async fn execute_in_transaction(&self, statements: &[String]) -> Result<u64>;

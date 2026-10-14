@@ -403,6 +403,31 @@ pub async fn exercise_editing(conn: &DynConnection, schema: &str) {
     conn.execute_in_transaction(&[format!("DROP TABLE {}", d.qualified(schema, &table))]).await.unwrap();
 }
 
+/// Streams `sql` through `query_batches`, checking batch sizes and the total row count.
+pub async fn exercise_streaming(conn: &DynConnection, sql: &str, expected: u64) {
+    let mut batches = 0u64;
+    let mut seen = 0u64;
+    let mut max_batch = 0;
+    let total = conn
+        .query_batches(sql, 1000, &mut |cols, rows| {
+            assert!(!cols.is_empty());
+            batches += 1;
+            seen += rows.len() as u64;
+            max_batch = max_batch.max(rows.len());
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(total, expected);
+    assert_eq!(seen, expected);
+    assert!(max_batch <= 1000);
+    assert!(batches >= expected / 1000);
+    // A failing sink aborts the stream and leaves the connection usable.
+    let err = conn.query_batches(sql, 10, &mut |_, _| anyhow::bail!("stop")).await.unwrap_err();
+    assert_eq!(err.to_string(), "stop");
+    assert!(conn.query("SELECT 1", None).await.is_ok());
+}
+
 /// Times a closure for perf assertions/logging.
 pub async fn timed<T>(label: &str, f: impl std::future::Future<Output = T>) -> T {
     let start = Instant::now();

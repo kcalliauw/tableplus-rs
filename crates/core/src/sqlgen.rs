@@ -219,6 +219,17 @@ pub fn where_clause(dialect: Dialect, filters: &[Filter], all_columns: &[String]
     (!parts.is_empty()).then(|| parts.join(" AND "))
 }
 
+/// `sort` plus any key columns not already in it, giving a total order for stable paging.
+pub fn with_tiebreaker(sort: &[SortKey], key_columns: &[String]) -> Vec<SortKey> {
+    let mut out = sort.to_vec();
+    for k in key_columns {
+        if !out.iter().any(|s| &s.column == k) {
+            out.push(SortKey { column: k.clone(), descending: false });
+        }
+    }
+    out
+}
+
 pub fn order_by_clause(dialect: Dialect, sort: &[SortKey]) -> Option<String> {
     if sort.is_empty() {
         return None;
@@ -435,6 +446,17 @@ mod tests {
         assert_eq!(where_clause(Dialect::MySql, &[disabled, null], &all).unwrap(), "`name` IS NULL");
         let raw = Filter { op: FilterOp::Raw, value: "id > 3 OR id < 1".into(), ..Default::default() };
         assert_eq!(filter_condition(Dialect::MySql, &raw, &all).unwrap(), "(id > 3 OR id < 1)");
+    }
+
+    #[test]
+    fn tiebreaker() {
+        let sort = vec![SortKey { column: "score".into(), descending: true }];
+        let keys = vec!["id".to_string()];
+        let s = with_tiebreaker(&sort, &keys);
+        assert_eq!(s.len(), 2);
+        assert_eq!(s[1], SortKey { column: "id".into(), descending: false });
+        assert_eq!(with_tiebreaker(&s, &keys), s);
+        assert_eq!(with_tiebreaker(&[], &keys).len(), 1);
     }
 
     #[test]

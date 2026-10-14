@@ -9,7 +9,7 @@ use mysql_async::prelude::Queryable;
 use mysql_async::{Conn, Opts, OptsBuilder, SslOpts};
 use tokio::sync::Mutex;
 
-use super::Connection;
+use super::{BatchSink, Connection};
 use crate::config::{ConnectionConfig, Credentials, SslMode};
 use crate::dialect::Dialect;
 use crate::model::{
@@ -531,6 +531,46 @@ impl Connection for MyConnection {
         }
         result.drop_result().await.map_err(my_error)?;
         Ok(StatementResult::Rows(ResultSet { columns: meta, rows, truncated }))
+    }
+
+    async fn query_batches(&self, sql: &str, batch: usize, sink: &mut BatchSink<'_>) -> Result<u64> {
+        let mut conn = self.conn.lock().await;
+        let mut result = conn.query_iter(sql).await.map_err(my_error)?;
+        let Some(columns) = result.columns().filter(|c| !c.is_empty()) else {
+            result.drop_result().await.map_err(my_error)?;
+            bail!("statement returned no rows");
+        };
+        let meta: Vec<ColumnMeta> = columns
+            .iter()
+            .map(|c| ColumnMeta::new(c.name_str(), type_label(c.column_type(), c.flags(), c.character_set())))
+            .collect();
+        let mut buf: Vec<Row> = Vec::with_capacity(batch);
+        let mut total = 0u64;
+        let mut failed = None;
+        while let Some(row) = result.next().await.map_err(my_error)? {
+            if failed.is_some() {
+                continue; // drain so the connection stays usable
+            }
+            buf.push(
+                row.unwrap_raw()
+                    .into_iter()
+                    .zip(columns.iter())
+                    .map(|(v, c)| to_value(v, c.column_type(), c.flags(), c.character_set()))
+                    .collect(),
+            );
+            total += 1;
+            if buf.len() >= batch
+                && let Err(e) = sink(&meta, std::mem::take(&mut buf))
+            {
+                failed = Some(e);
+            }
+        }
+        result.drop_result().await.map_err(my_error)?;
+        if let Some(e) = failed {
+            return Err(e);
+        }
+        sink(&meta, buf)?;
+        Ok(total)
     }
 
     async fn execute_in_transaction(&self, statements: &[String]) -> Result<u64> {

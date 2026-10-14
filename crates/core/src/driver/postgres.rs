@@ -15,7 +15,7 @@ use tokio::sync::Mutex;
 use tokio_postgres::types::Type;
 use tokio_postgres::{CancelToken, Client, SimpleQueryMessage};
 
-use super::Connection;
+use super::{BatchSink, Connection};
 use crate::alter::{ColumnDef, create_table_sql};
 use crate::config::{ConnectionConfig, Credentials, SslMode};
 use crate::dialect::Dialect;
@@ -167,6 +167,63 @@ impl PgConnection {
                 _ => None,
             })
             .collect())
+    }
+
+    /// Runs one statement, reporting column metadata once and then each row until `on_row`
+    /// returns false. Returns whether the statement produced a result set, and the command count.
+    async fn stream(
+        &self,
+        sql: &str,
+        on_columns: &mut (dyn FnMut(&[ColumnMeta]) + Send),
+        on_row: &mut (dyn FnMut(Row) -> Result<bool> + Send),
+    ) -> Result<(bool, u64)> {
+        let client = self.client.lock().await;
+        let types: Option<Vec<Type>> = match client.prepare(sql).await {
+            Ok(stmt) => Some(stmt.columns().iter().map(|c| c.type_().clone()).collect()),
+            // Multi-statement strings can't be prepared; run them untyped.
+            Err(e)
+                if e.as_db_error()
+                    .is_some_and(|d| d.code().code() == "42601" && d.message().contains("multiple commands")) =>
+            {
+                None
+            }
+            Err(e) => return Err(pg_error(e)),
+        };
+        let stream = client.simple_query_raw(sql).await.map_err(pg_error)?;
+        pin_mut!(stream);
+        let mut has_rows = false;
+        let mut affected = 0;
+        while let Some(msg) = stream.next().await {
+            match msg.map_err(pg_error)? {
+                SimpleQueryMessage::RowDescription(desc) if !has_rows => {
+                    has_rows = true;
+                    let cols: Vec<ColumnMeta> = desc
+                        .iter()
+                        .enumerate()
+                        .map(|(i, c)| {
+                            let ty = types.as_ref().and_then(|t| t.get(i));
+                            ColumnMeta::new(c.name(), ty.map(type_label).unwrap_or_default())
+                        })
+                        .collect();
+                    on_columns(&cols);
+                }
+                SimpleQueryMessage::Row(r) => {
+                    let row: Row =
+                        (0..r.len()).map(|i| to_value(r.get(i), types.as_ref().and_then(|t| t.get(i)))).collect();
+                    if !on_row(row)? {
+                        break;
+                    }
+                }
+                SimpleQueryMessage::CommandComplete(n) => {
+                    affected = n;
+                    if has_rows {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok((has_rows, affected))
     }
 
     fn regclass(schema: &str, table: &str) -> String {
@@ -390,60 +447,53 @@ impl Connection for PgConnection {
     }
 
     async fn query(&self, sql: &str, max_rows: Option<usize>) -> Result<StatementResult> {
-        let client = self.client.lock().await;
-        let types: Option<Vec<Type>> = match client.prepare(sql).await {
-            Ok(stmt) => Some(stmt.columns().iter().map(|c| c.type_().clone()).collect()),
-            // Multi-statement strings can't be prepared; run them untyped.
-            Err(e)
-                if e.as_db_error()
-                    .is_some_and(|d| d.code().code() == "42601" && d.message().contains("multiple commands")) =>
-            {
-                None
-            }
-            Err(e) => return Err(pg_error(e)),
-        };
-        let stream = client.simple_query_raw(sql).await.map_err(pg_error)?;
-        pin_mut!(stream);
-        let mut columns: Option<Vec<ColumnMeta>> = None;
-        let mut rows: Vec<Row> = Vec::new();
-        let mut affected = 0;
-        let mut truncated = false;
         let limit = max_rows.unwrap_or(usize::MAX);
-        while let Some(msg) = stream.next().await {
-            match msg.map_err(pg_error)? {
-                SimpleQueryMessage::RowDescription(desc) if columns.is_none() => {
-                    columns = Some(
-                        desc.iter()
-                            .enumerate()
-                            .map(|(i, c)| {
-                                let ty = types.as_ref().and_then(|t| t.get(i));
-                                ColumnMeta::new(c.name(), ty.map(type_label).unwrap_or_default())
-                            })
-                            .collect(),
-                    );
+        let mut cols = Vec::new();
+        let mut rows: Vec<Row> = Vec::new();
+        let mut truncated = false;
+        let (has_rows, affected) = self
+            .stream(sql, &mut |c| cols = c.to_vec(), &mut |row| {
+                if rows.len() >= limit {
+                    truncated = true;
+                    return Ok(false);
                 }
-                SimpleQueryMessage::Row(r) => {
-                    if rows.len() >= limit {
-                        truncated = true;
-                        break;
-                    }
-                    let row: Row =
-                        (0..r.len()).map(|i| to_value(r.get(i), types.as_ref().and_then(|t| t.get(i)))).collect();
-                    rows.push(row);
-                }
-                SimpleQueryMessage::CommandComplete(n) => {
-                    affected = n;
-                    if columns.is_some() {
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        Ok(match columns {
-            Some(columns) => StatementResult::Rows(ResultSet { columns, rows, truncated }),
-            None => StatementResult::Affected(affected),
+                rows.push(row);
+                Ok(true)
+            })
+            .await?;
+        Ok(if has_rows {
+            StatementResult::Rows(ResultSet { columns: cols, rows, truncated })
+        } else {
+            StatementResult::Affected(affected)
         })
+    }
+
+    async fn query_batches(&self, sql: &str, batch: usize, sink: &mut BatchSink<'_>) -> Result<u64> {
+        let cols = std::sync::Mutex::new(Vec::new());
+        let mut buf: Vec<Row> = Vec::with_capacity(batch);
+        let mut total = 0u64;
+        let mut failed = None;
+        let (has_rows, _) = self
+            .stream(sql, &mut |c| *cols.lock().expect("cols") = c.to_vec(), &mut |row| {
+                buf.push(row);
+                total += 1;
+                if buf.len() >= batch
+                    && let Err(e) = sink(&cols.lock().expect("cols"), std::mem::take(&mut buf))
+                {
+                    failed = Some(e);
+                    return Ok(false);
+                }
+                Ok(true)
+            })
+            .await?;
+        if let Some(e) = failed {
+            return Err(e);
+        }
+        if !has_rows {
+            bail!("statement returned no rows");
+        }
+        sink(&cols.lock().expect("cols"), buf)?;
+        Ok(total)
     }
 
     async fn execute_in_transaction(&self, statements: &[String]) -> Result<u64> {

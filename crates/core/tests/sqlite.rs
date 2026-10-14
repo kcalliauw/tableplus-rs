@@ -79,5 +79,6 @@ async fn sqlite_end_to_end() {
     let err = conn.query("SELECT * FROM nope", None).await.unwrap_err().to_string();
     assert!(err.contains("no such table"), "{err}");
 
+    timed("sqlite streaming 20k rows", exercise_streaming(&conn, "SELECT * FROM orders", 20_000)).await;
     exercise_editing(&conn, "main").await;
 }

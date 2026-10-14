@@ -179,3 +179,15 @@ async fn mariadb_metadata_and_editing() {
     assert_eq!(count(&conn, "shop", "invoices", None).await, 20_000);
     exercise_editing(&conn, "shop").await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mysql_streaming() {
+    let Some(conn) = connect_or_skip(&mysql_config(), &password()).await else {
+        return;
+    };
+    timed(
+        "mysql streaming 250k rows",
+        exercise_streaming(&conn, "SELECT * FROM analytics.events WHERE id <= 250000", 250_000),
+    )
+    .await;
+}

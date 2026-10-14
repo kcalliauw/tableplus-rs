@@ -31,5 +31,6 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 keyring = "4"
 
 [dev-dependencies]
+anyhow.workspace = true
 tempfile = "3"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

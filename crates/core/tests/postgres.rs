@@ -192,3 +192,15 @@ async fn tls_modes() {
     let err = driver::test_connection(&bad, &password()).await.unwrap_err().to_string();
     assert!(err.contains("password authentication failed"), "{err}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn streaming() {
+    let Some(conn) = connect_or_skip(&pg_config(), &password()).await else {
+        return;
+    };
+    timed(
+        "pg streaming 250k rows",
+        exercise_streaming(&conn, "SELECT * FROM analytics.events WHERE id <= 250000", 250_000),
+    )
+    .await;
+}

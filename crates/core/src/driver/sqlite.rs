@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use rusqlite::types::ValueRef;
 use rusqlite::{InterruptHandle, OpenFlags};
 
-use super::Connection;
+use super::{BatchSink, Connection};
 use crate::alter::{ColumnDef, create_table_sql};
 use crate::config::ConnectionConfig;
 use crate::dialect::Dialect;
@@ -336,6 +336,47 @@ impl Connection for SqliteConnection {
             Ok(StatementResult::Rows(ResultSet { columns, rows, truncated }))
         })
         .await
+    }
+
+    async fn query_batches(&self, sql: &str, batch: usize, sink: &mut BatchSink<'_>) -> Result<u64> {
+        // The blocking reader hands batches to the async side over a bounded channel, so
+        // memory stays at a few batches regardless of result size.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<(Vec<ColumnMeta>, Vec<Row>)>(2);
+        let conn = self.conn.clone();
+        let sql = sql.to_string();
+        let reader = tokio::task::spawn_blocking(move || -> Result<u64> {
+            let guard = conn.lock().map_err(|_| anyhow!("SQLite connection poisoned"))?;
+            let mut stmt = guard.prepare(&sql)?;
+            let columns: Vec<ColumnMeta> =
+                stmt.columns().iter().map(|c| ColumnMeta::new(c.name(), c.decl_type().unwrap_or_default())).collect();
+            let n = columns.len();
+            let mut q = stmt.query([])?;
+            let mut buf: Vec<Row> = Vec::with_capacity(batch);
+            let mut total = 0;
+            while let Some(r) = q.next()? {
+                buf.push((0..n).map(|i| value_from(r.get_ref(i).unwrap_or(ValueRef::Null))).collect());
+                total += 1;
+                if buf.len() >= batch && tx.blocking_send((columns.clone(), std::mem::take(&mut buf))).is_err() {
+                    return Ok(total); // receiver gone (sink failed)
+                }
+            }
+            let _ = tx.blocking_send((columns, buf));
+            Ok(total)
+        });
+        let mut sink_error = None;
+        while let Some((cols, rows)) = rx.recv().await {
+            if sink_error.is_none()
+                && let Err(e) = sink(&cols, rows)
+            {
+                sink_error = Some(e);
+                rx.close();
+            }
+        }
+        let total = reader.await??;
+        match sink_error {
+            Some(e) => Err(e),
+            None => Ok(total),
+        }
     }
 
     async fn execute_in_transaction(&self, statements: &[String]) -> Result<u64> {

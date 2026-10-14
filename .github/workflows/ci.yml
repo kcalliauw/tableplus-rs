@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Linux · lint + tests against real databases
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: System libraries
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libgl1-mesa-dev libwayland-dev libssl-dev
+      - name: Start databases
+        run: docker compose -f docker/compose.yml up -d --wait
+      - name: rustfmt
+        run: cargo fmt --all --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Tests (unit + PostgreSQL / MySQL / MariaDB / SQLite / SSH integration)
+        run: cargo test --workspace
+        env:
+          TABLEPLUS_REQUIRE_DB: "1"
+
+  macos:
+    name: macOS · build + unit tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build (release)
+        run: cargo build --release --workspace
+      - name: Unit tests
+        run: cargo test --workspace --lib --bins
+      - name: App bundle
+        run: scripts/bundle-macos.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tableplus-rs-macos
+          path: dist/*.dmg

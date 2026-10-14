@@ -93,12 +93,12 @@ pub fn show(
 
 fn session_summary(catalog: &SessionCatalog) -> String {
     use tableplus_core::model::ObjectKind::*;
-    let count = |k| catalog.objects.iter().filter(|o| o.kind == k).count();
+    let count = |k| catalog.objects.iter().filter(|o| o.kind == k).count() as u64;
     format!(
-        "{} tables · {} views · {} routines",
-        count(Table),
-        count(View) + count(MaterializedView),
-        count(Function) + count(Procedure)
+        "{} · {} · {}",
+        widgets::plural(count(Table), "table"),
+        widgets::plural(count(View) + count(MaterializedView), "view"),
+        widgets::plural(count(Function) + count(Procedure), "routine")
     )
 }
 

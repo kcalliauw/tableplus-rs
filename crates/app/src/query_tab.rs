@@ -81,6 +81,7 @@ impl QueryTab {
     }
 
     fn run(&mut self, ctx: &mut TabCtx, all: bool) {
+        self.editor.close_popup();
         if self.running.is_some() {
             return;
         }
@@ -293,8 +294,8 @@ impl QueryTab {
                             let trunc = if rs.truncated { " (limited)" } else { "" };
                             ui.label(
                                 RichText::new(format!(
-                                    "{} rows{trunc} · {}",
-                                    fmt_count(rs.rows.len() as u64),
+                                    "{}{trunc} · {}",
+                                    widgets::plural(rs.rows.len() as u64, "row"),
                                     fmt_duration(pane.output.elapsed)
                                 ))
                                 .size(12.0)

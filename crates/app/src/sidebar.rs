@@ -390,7 +390,7 @@ fn history_list(ui: &mut Ui, session: &mut Session, history: &History, actions: 
                     (format!("{} · {}", ago(e.executed_at), err.lines().next().unwrap_or_default()), p.danger)
                 }
                 (None, Some(n)) => (
-                    format!("{} · {} ms · {} rows", ago(e.executed_at), e.duration_ms, widgets::fmt_count(n)),
+                    format!("{} · {} ms · {}", ago(e.executed_at), e.duration_ms, widgets::plural(n, "row")),
                     p.text_faint,
                 ),
                 (None, None) => (format!("{} · {} ms", ago(e.executed_at), e.duration_ms), p.text_faint),

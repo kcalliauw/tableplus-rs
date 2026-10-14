@@ -160,7 +160,7 @@ impl ExportDialog {
                 Ok(n) => {
                     actions.push(Action::Toast(
                         ToastKind::Success,
-                        format!("Exported {} rows to {}", fmt_count(n), self.path),
+                        format!("Exported {} to {}", widgets::plural(n, "row"), self.path),
                     ));
                     return false;
                 }
@@ -174,7 +174,7 @@ impl ExportDialog {
             ui.heading(format!("Export {}", self.source.name()));
             let what = match &self.source {
                 ExportSource::Rows { rows, .. } => {
-                    format!("{} rows from the current result", fmt_count(rows.len() as u64))
+                    format!("{} from the current result", widgets::plural(rows.len() as u64, "row"))
                 }
                 ExportSource::Table { where_clause: Some(_), .. } => "All rows matching the current filter".to_string(),
                 ExportSource::Table { .. } => "All rows of the table (streamed from the server)".to_string(),
@@ -315,7 +315,7 @@ impl ImportDialog {
                     let (stmts, n) =
                         csv_to_inserts(dialect, &object.schema, &object.name, &st.columns, bytes.as_slice(), &opts)?;
                     conn.execute_in_transaction(&stmts).await?;
-                    Ok(format!("Imported {} rows into {}", fmt_count(n), object.name))
+                    Ok(format!("Imported {} into {}", widgets::plural(n, "row"), object.name))
                 }
                 ImportKind::Sql => {
                     let script = String::from_utf8(bytes).context("SQL file is not UTF-8")?;
@@ -340,6 +340,7 @@ impl ImportDialog {
                 Ok(msg) => {
                     actions.push(Action::Toast(ToastKind::Success, msg));
                     actions.push(Action::RefreshObjects);
+                    actions.push(Action::ReloadTable(self.object.clone()));
                     return false;
                 }
                 Err(e) => self.error = Some(format!("{e:#}")),

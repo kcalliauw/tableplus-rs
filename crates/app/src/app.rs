@@ -18,7 +18,7 @@ use crate::conn_dialog::{ConnDialog, DialogOutcome};
 use crate::export_dialog::{ExportDialog, ExportSource, ImportDialog};
 use crate::icons::{self, Icon};
 use crate::quick_open::{QuickOpen, QuickPick};
-use crate::session::Session;
+use crate::session::{Session, TabKind};
 use crate::settings::Settings;
 use crate::task::{Spawner, Task};
 use crate::theme::{self, ThemeChoice, palette};
@@ -34,14 +34,25 @@ pub enum Action {
     ShowWelcome,
     SwitchSession(usize),
     CloseSession(usize),
-    OpenObject { object: SchemaObject, structure: bool },
+    OpenObject {
+        object: SchemaObject,
+        structure: bool,
+    },
     ShowDefinition(SchemaObject),
     NewQuery(Option<String>),
     RecordHistory(HistoryEntry),
     Toast(ToastKind, String),
     RefreshObjects,
-    InvalidateStructure { schema: String, table: String },
-    LoadStructure { schema: String, table: String },
+    InvalidateStructure {
+        schema: String,
+        table: String,
+    },
+    /// Reload open data tabs of a table whose rows changed outside them (e.g. an import).
+    ReloadTable(SchemaObject),
+    LoadStructure {
+        schema: String,
+        table: String,
+    },
     Export(ExportSource),
     Import(SchemaObject),
     QuickOpen,
@@ -536,6 +547,17 @@ impl TablePlusApp {
                     if let Some(s) = self.active.and_then(|i| self.sessions.get_mut(i)) {
                         s.reload_objects(&self.spawner);
                         s.catalog.structures.clear();
+                    }
+                }
+                Action::ReloadTable(object) => {
+                    if let Some(s) = self.active.and_then(|i| self.sessions.get_mut(i)) {
+                        for tab in &mut s.tabs {
+                            if let TabKind::Table(t) = &mut tab.kind
+                                && t.object == object
+                            {
+                                t.reload(&self.spawner, true);
+                            }
+                        }
                     }
                 }
                 Action::InvalidateStructure { schema, table } => {

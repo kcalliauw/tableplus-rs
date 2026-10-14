@@ -85,6 +85,10 @@ impl CodeEditor {
         self.pending_cursor = Some(cursor);
     }
 
+    pub fn close_popup(&mut self) {
+        self.popup = None;
+    }
+
     pub fn show(
         &mut self,
         ui: &mut Ui,
@@ -232,7 +236,10 @@ impl CodeEditor {
                             self.retry_at = Some(primary);
                         }
                         missing = res.missing_columns;
+                        // A lone suggestion identical to the typed word adds nothing.
+                        let only_exact = matches!(res.suggestions.as_slice(), [s] if s.label.eq_ignore_ascii_case(&res.context.prefix));
                         let show = !res.suggestions.is_empty()
+                            && (force_complete || !only_exact)
                             && (force_complete
                                 || res.context.qualifier.is_some()
                                 || (self.popup.is_some() && !res.context.prefix.is_empty())

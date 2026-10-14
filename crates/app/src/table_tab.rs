@@ -60,6 +60,8 @@ pub struct TableTab {
     grid: GridState,
     staged: StagedChanges,
     commit_task: Option<Task<u64>>,
+    /// SQL and start time of the running commit, recorded in history when it finishes.
+    commit_started: Option<(String, std::time::Instant)>,
     preview: Option<Vec<String>>,
     commit_error: Option<String>,
     initial_load: bool,
@@ -92,6 +94,7 @@ impl TableTab {
             grid: GridState::default(),
             staged: StagedChanges::default(),
             commit_task: None,
+            commit_started: None,
             preview: None,
             commit_error: None,
             initial_load: false,
@@ -213,6 +216,17 @@ impl TableTab {
             self.total = r.ok();
         }
         if let Some(r) = poll_slot(&mut self.commit_task) {
+            if let Some((sql, started)) = self.commit_started.take() {
+                ctx.actions.push(Action::RecordHistory(HistoryEntry {
+                    connection_id: ctx.connection.id,
+                    connection_name: ctx.connection.display_name(),
+                    sql,
+                    executed_at: Utc::now(),
+                    duration_ms: started.elapsed().as_millis() as u64,
+                    rows: r.as_ref().ok().copied(),
+                    error: r.as_ref().err().map(|e| format!("{e:#}")),
+                }));
+            }
             match r {
                 Ok(n) => {
                     ctx.actions.push(Action::Toast(
@@ -261,15 +275,7 @@ impl TableTab {
         }
         let conn = self.conn.clone();
         let stmts = statements.clone();
-        ctx.actions.push(Action::RecordHistory(HistoryEntry {
-            connection_id: ctx.connection.id,
-            connection_name: ctx.connection.display_name(),
-            sql: statements.join(";\n") + ";",
-            executed_at: Utc::now(),
-            duration_ms: 0,
-            rows: Some(self.staged.count() as u64),
-            error: None,
-        }));
+        self.commit_started = Some((statements.join(";\n") + ";", std::time::Instant::now()));
         self.commit_task = Some(ctx.spawner.spawn(async move { conn.execute_in_transaction(&stmts).await }));
     }
 
@@ -736,7 +742,8 @@ impl TableTab {
                 (None, true) => "…".into(),
                 (None, false) => "?".into(),
             };
-            format!("{}–{} of {} rows", fmt_count(start + 1), fmt_count(start + loaded), total)
+            let noun = if self.total == Some(1) { "row" } else { "rows" };
+            format!("{}–{} of {total} {noun}", fmt_count(start + 1), fmt_count(start + loaded))
         };
         let mut r = ui.label(RichText::new(info).color(p.text_muted).size(12.0));
         if let Some(e) = self.elapsed {

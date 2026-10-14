@@ -11,6 +11,8 @@ mod editor;
 mod export_dialog;
 mod grid;
 mod icons;
+#[cfg(target_os = "macos")]
+mod macos_menu;
 mod query_tab;
 mod quick_open;
 mod session;
@@ -47,15 +49,19 @@ fn main() -> eframe::Result {
         _ => eframe::Renderer::Glow,
     };
 
-    let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("tableplus-rs")
-            .with_app_id("tableplus-rs")
-            .with_inner_size([1360.0, 860.0])
-            .with_min_inner_size([760.0, 480.0]),
-        renderer,
-        centered: true,
-        ..Default::default()
-    };
+    let mut viewport = eframe::egui::ViewportBuilder::default()
+        .with_title("tableplus-rs")
+        .with_app_id("tableplus-rs")
+        .with_inner_size([1360.0, 860.0])
+        .with_min_inner_size([760.0, 480.0]);
+    if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")) {
+        viewport = viewport.with_icon(std::sync::Arc::new(icon));
+    }
+    if cfg!(target_os = "macos") {
+        // Unified toolbar like native macOS apps: content runs under a transparent titlebar.
+        viewport = viewport.with_fullsize_content_view(true).with_titlebar_shown(false).with_title_shown(false);
+    }
+
+    let options = eframe::NativeOptions { viewport, renderer, centered: true, ..Default::default() };
     eframe::run_native("tableplus-rs", options, Box::new(|cc| Ok(Box::new(app::TablePlusApp::new(cc, runtime)))))
 }

@@ -30,3 +30,7 @@ eframe = { version = "0.36", default-features = false, features = [
 rfd = "0.17"
 dirs = "6"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Native menu bar (macOS only).
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = { version = "0.21", default-features = false }

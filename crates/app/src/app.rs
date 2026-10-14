@@ -87,6 +87,24 @@ impl Shortcuts {
     }
 }
 
+impl Shortcuts {
+    /// Combines shortcuts from another source (the native menu bar).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn merge(&mut self, o: Shortcuts) {
+        self.quick_open |= o.quick_open;
+        self.new_query |= o.new_query;
+        self.close_tab |= o.close_tab;
+        self.commit |= o.commit;
+        self.run |= o.run;
+        self.run_all |= o.run_all;
+        self.refresh |= o.refresh;
+        self.find |= o.find;
+        self.new_connection |= o.new_connection;
+        self.next_tab |= o.next_tab;
+        self.prev_tab |= o.prev_tab;
+    }
+}
+
 /// `⌘K` on macOS, `Ctrl+K` elsewhere.
 pub fn shortcut_label(key: &str) -> String {
     if cfg!(target_os = "macos") { format!("⌘{key}") } else { format!("Ctrl+{key}") }
@@ -140,6 +158,8 @@ pub struct TablePlusApp {
     applied_theme: Option<ThemeChoice>,
     title: String,
     settings_open: bool,
+    #[cfg(target_os = "macos")]
+    menu: Option<crate::macos_menu::AppMenu>,
 }
 
 impl TablePlusApp {
@@ -175,6 +195,8 @@ impl TablePlusApp {
             applied_theme: None,
             title: String::new(),
             settings_open: false,
+            #[cfg(target_os = "macos")]
+            menu: crate::macos_menu::AppMenu::install(),
         };
         // `--connect <name>` opens a saved connection on startup.
         let mut args = std::env::args().skip(1);
@@ -278,8 +300,19 @@ impl TablePlusApp {
         let rect = ui.max_rect();
         ui.painter().rect_filled(rect, CornerRadius::ZERO, p.toolbar_bg);
         ui.painter().line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, p.border));
+        // The empty toolbar background moves the window (it doubles as the titlebar on macOS).
+        let drag = ui.interact(rect, egui::Id::new("toolbar_drag"), Sense::click_and_drag());
+        if drag.drag_started() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
+        if drag.double_clicked() {
+            let maximized = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+        }
         ui.horizontal_centered(|ui| {
-            ui.add_space(6.0);
+            // Leave room for the traffic-light buttons on macOS.
+            let fullscreen = ui.ctx().input(|i| i.viewport().fullscreen.unwrap_or(false));
+            ui.add_space(if cfg!(target_os = "macos") && !fullscreen { 76.0 } else { 6.0 });
             if !self.sessions.is_empty() {
                 let home = widgets::icon_button(ui, Icon::Home, "Connections");
                 if self.active.is_none() {
@@ -301,10 +334,16 @@ impl TablePlusApp {
                 }
             }
 
-            // Centered connection pill.
-            let pill_w = (ui.available_width() - 180.0).clamp(200.0, 560.0);
-            let center = egui::pos2(rect.center().x, rect.center().y);
-            let pill = egui::Rect::from_center_size(center, vec2(pill_w, 26.0));
+            // Connection pill: centered in the window when there is room, otherwise in the
+            // space between the session chips and the toolbar buttons.
+            let left_edge = ui.cursor().left() + 10.0;
+            let right_edge = rect.right() - 150.0;
+            let pill_w = (right_edge - left_edge).clamp(160.0, 560.0);
+            let cx = rect
+                .center()
+                .x
+                .clamp(left_edge + pill_w / 2.0, (right_edge - pill_w / 2.0).max(left_edge + pill_w / 2.0));
+            let pill = egui::Rect::from_center_size(egui::pos2(cx, rect.center().y), vec2(pill_w, 26.0));
             let painter = ui.painter();
             painter.rect(
                 pill,
@@ -728,7 +767,11 @@ impl TablePlusApp {
 fn session_chip(ui: &mut Ui, s: &Session, active: bool, index: usize, actions: &mut Vec<Action>) -> bool {
     let p = palette(ui);
     let font = theme::ui_font(12.0);
-    let galley = ui.painter().layout_no_wrap(s.display_name(), font, if active { p.text } else { p.text_muted });
+    let mut name = s.display_name();
+    if name.chars().count() > 22 {
+        name = name.chars().take(21).collect::<String>() + "…";
+    }
+    let galley = ui.painter().layout_no_wrap(name, font, if active { p.text } else { p.text_muted });
     let size = vec2(galley.size().x + 44.0, 24.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     if active {
@@ -763,9 +806,24 @@ impl eframe::App for TablePlusApp {
         let modal_open = self.conn_dialog.is_some()
             || self.password_prompt.is_some()
             || self.export_dialog.is_some()
-            || self.import_dialog.is_some();
-        let shortcuts = if modal_open { Shortcuts::default() } else { Shortcuts::read(&ctx) };
+            || self.import_dialog.is_some()
+            || self.settings_open;
+        #[allow(unused_mut)]
+        let mut shortcuts = if modal_open { Shortcuts::default() } else { Shortcuts::read(&ctx) };
         let mut actions = Vec::new();
+        #[cfg(target_os = "macos")]
+        if let Some(menu) = &self.menu {
+            let mut theme = None;
+            let mut menu_shortcuts = Shortcuts::default();
+            menu.poll(&mut menu_shortcuts, &mut actions, &mut theme, &mut self.settings_open);
+            if !modal_open {
+                shortcuts.merge(menu_shortcuts);
+            }
+            if let Some(t) = theme {
+                self.settings.theme = t;
+                self.settings.save(&self.dir);
+            }
+        }
         self.handle_shortcuts(&shortcuts, &mut actions);
 
         egui::Panel::top("toolbar").exact_size(40.0).frame(egui::Frame::NONE).show(ui, |ui| {
@@ -787,15 +845,15 @@ impl eframe::App for TablePlusApp {
             }
             _ => {
                 let busy = self.connecting.as_ref().map(|c| c.config.id);
-                crate::welcome::show(
-                    ui,
-                    &mut self.welcome,
-                    &self.store.connections,
-                    busy,
-                    &self.connect_errors,
-                    self.secrets.backend_name(),
-                    &mut actions,
-                );
+                let keyboard = !modal_open && self.quick_open.is_none();
+                let view = crate::welcome::WelcomeView {
+                    connections: &self.store.connections,
+                    connecting: busy,
+                    errors: &self.connect_errors,
+                    secrets_backend: self.secrets.backend_name(),
+                    keyboard,
+                };
+                crate::welcome::show(ui, &mut self.welcome, view, &mut actions);
             }
         }
 

@@ -69,6 +69,9 @@ fn items(ui: &mut Ui, session: &mut Session, actions: &mut Vec<Action>) {
             schemas.push(&o.schema);
         }
     }
+    // The default schema (public / the connected database) comes first.
+    let default_schema = session.catalog.default_schema.clone();
+    schemas.sort_by_key(|s| *s != default_schema.as_str());
     let multi_schema = schemas.len() > 1;
     let expanded = &session.sidebar.expanded;
     let mut rows: Vec<Row> = Vec::new();
@@ -398,6 +401,10 @@ fn history_list(ui: &mut Ui, session: &mut Session, history: &History, actions: 
                 meta.0,
                 theme::ui_font(11.0),
                 meta.1,
+            );
+            ui.painter().line_segment(
+                [rect.left_bottom() + vec2(6.0, 1.0), rect.right_bottom() + vec2(-6.0, 1.0)],
+                Stroke::new(1.0, p.border.gamma_multiply(0.6)),
             );
             if resp.clicked() {
                 actions.push(Action::NewQuery(Some(e.sql.clone())));

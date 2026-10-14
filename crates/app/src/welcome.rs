@@ -47,15 +47,19 @@ fn logo(ui: &mut Ui, size: f32) {
     icons::paint(painter, inner, Icon::Database, Color32::from_rgb(0x3A, 0x2A, 0x05));
 }
 
-pub fn show(
-    ui: &mut Ui,
-    state: &mut WelcomeState,
-    connections: &[ConnectionConfig],
-    connecting: Option<Uuid>,
-    errors: &HashMap<Uuid, String>,
-    secrets_backend: &str,
-    actions: &mut Vec<Action>,
-) {
+/// What the welcome screen shows.
+pub struct WelcomeView<'a> {
+    pub connections: &'a [ConnectionConfig],
+    /// Connection currently being opened (spinner).
+    pub connecting: Option<Uuid>,
+    pub errors: &'a HashMap<Uuid, String>,
+    pub secrets_backend: &'a str,
+    /// False while a dialog or overlay owns the keyboard.
+    pub keyboard: bool,
+}
+
+pub fn show(ui: &mut Ui, state: &mut WelcomeState, view: WelcomeView<'_>, actions: &mut Vec<Action>) {
+    let WelcomeView { connections, connecting, errors, secrets_backend, keyboard } = view;
     let p = palette(ui);
     egui::CentralPanel::default().frame(egui::Frame::new().fill(p.sidebar_bg)).show(ui, |ui| {
         let avail = ui.available_rect_before_wrap();
@@ -117,7 +121,7 @@ pub fn show(
             let w = ui.available_width() - 34.0;
             let search =
                 widgets::search_field(ui, &mut state.search, "Search for connection…", Id::new("welcome_search"), w);
-            if ui.memory(|m| m.focused().is_none()) && !connections.is_empty() {
+            if keyboard && ui.memory(|m| m.focused().is_none()) && !connections.is_empty() {
                 search.request_focus();
             }
             if widgets::icon_button(ui, Icon::Plus, "New connection").clicked() {
@@ -154,7 +158,7 @@ pub fn show(
 
         // Keyboard navigation.
         let ids: Vec<Uuid> = list.iter().map(|(_, c)| c.id).collect();
-        if !ids.is_empty() {
+        if !ids.is_empty() && keyboard {
             let (down, up, enter) =
                 rui.input(|i| (i.key_pressed(Key::ArrowDown), i.key_pressed(Key::ArrowUp), i.key_pressed(Key::Enter)));
             let pos = state.selected.and_then(|s| ids.iter().position(|i| *i == s));

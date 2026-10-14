@@ -74,6 +74,9 @@ pub struct CellEditor {
 pub struct GridState {
     pub widths: Vec<f32>,
     width_key: Vec<String>,
+    /// Columns the user resized by hand (never auto-sized again).
+    user_sized: Vec<bool>,
+    remeasure: bool,
     pub focus: Option<(usize, usize)>,
     pub selected: BTreeSet<usize>,
     anchor: Option<usize>,
@@ -138,21 +141,37 @@ impl GridState {
         }
     }
 
+    /// Re-measures auto-sized columns after new rows arrive; columns only grow.
+    pub fn remeasure(&mut self) {
+        self.remeasure = true;
+    }
+
     fn ensure_widths(&mut self, ui: &Ui, data: &dyn GridData) {
         let names: Vec<String> = data.columns().iter().map(|c| c.name.clone()).collect();
-        if self.widths.len() == names.len() && self.width_key == names {
+        let fresh = self.widths.len() != names.len() || self.width_key != names;
+        if !fresh && !std::mem::take(&mut self.remeasure) {
             return;
         }
         let sample = data.row_count().min(200);
         let char_w = ui.fonts_mut(|f| f.glyph_width(&theme::ui_font(13.0), '0')).max(6.0);
-        self.widths = (0..names.len())
+        let measured: Vec<f32> = (0..names.len())
             .map(|c| {
                 let header = names[c].chars().count() as f32 * (char_w + 0.6) + 34.0;
                 let longest = (0..sample).map(|r| data.cell(r, c).text.chars().count()).max().unwrap_or(4) as f32;
                 (longest * char_w + 22.0).max(header).clamp(64.0, 380.0)
             })
             .collect();
-        self.width_key = names;
+        if fresh {
+            self.widths = measured;
+            self.user_sized = vec![false; names.len()];
+            self.width_key = names;
+        } else {
+            for (c, w) in measured.into_iter().enumerate() {
+                if !self.user_sized.get(c).copied().unwrap_or(false) {
+                    self.widths[c] = self.widths[c].max(w);
+                }
+            }
+        }
     }
 
     pub fn start_edit(&mut self, data: &dyn GridData, row: usize, col: usize) {
@@ -598,9 +617,13 @@ pub fn show(ui: &mut Ui, id: Id, state: &mut GridState, data: &dyn GridData) -> 
                 ui.interact(handle, id.with(("resize", c)), Sense::drag()).on_hover_cursor(CursorIcon::ResizeColumn);
             if h.dragged() {
                 state.widths[c] = (state.widths[c] + h.drag_delta().x).clamp(36.0, 2000.0);
+                if let Some(u) = state.user_sized.get_mut(c) {
+                    *u = true;
+                }
                 ui.ctx().set_cursor_icon(CursorIcon::ResizeColumn);
             }
             if h.double_clicked() {
+                // Double-click on the edge resets to the auto width.
                 state.width_key.clear();
             }
         }

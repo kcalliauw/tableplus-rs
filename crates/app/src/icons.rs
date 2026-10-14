@@ -199,11 +199,11 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             ]);
         }
         Icon::Sun => {
-            painter.circle_stroke(g.p(8.0, 8.0), g.len(3.0), s);
+            painter.circle_filled(g.p(8.0, 8.0), g.len(3.0), color);
             for i in 0..8 {
                 let a = i as f32 * TAU / 8.0;
                 painter.line_segment(
-                    [g.p(8.0 + 4.8 * a.cos(), 8.0 + 4.8 * a.sin()), g.p(8.0 + 6.3 * a.cos(), 8.0 + 6.3 * a.sin())],
+                    [g.p(8.0 + 5.0 * a.cos(), 8.0 + 5.0 * a.sin()), g.p(8.0 + 6.8 * a.cos(), 8.0 + 6.8 * a.sin())],
                     s,
                 );
             }

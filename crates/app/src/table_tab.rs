@@ -127,15 +127,11 @@ impl TableTab {
         self.result.as_ref().map(|r| r.columns.iter().map(|c| c.name.clone()).collect()).unwrap_or_default()
     }
 
-    /// The user's sort, or the primary key so paging and post-commit reloads are stable.
+    /// The user's sort followed by the primary key, so paging and post-commit reloads are
+    /// stable even when the sort column has duplicates.
     fn effective_sort(&self) -> Vec<SortKey> {
-        if !self.sort.is_empty() {
-            return self.sort.clone();
-        }
-        self.structure
-            .as_ref()
-            .map(|st| st.primary_key().into_iter().map(|c| SortKey { column: c, descending: false }).collect())
-            .unwrap_or_default()
+        let pk = self.structure.as_ref().map(|st| st.primary_key()).unwrap_or_default();
+        sqlgen::with_tiebreaker(&self.sort, &pk)
     }
 
     fn where_clause(&self) -> Option<String> {
@@ -200,7 +196,9 @@ impl TableTab {
             match r {
                 Ok(page) => {
                     let same_columns = self.result.as_ref().is_some_and(|old| old.columns == page.rs.columns);
-                    if !same_columns {
+                    if same_columns {
+                        self.grid.remeasure();
+                    } else {
                         self.grid.reset();
                     }
                     self.result = Some(page.rs);

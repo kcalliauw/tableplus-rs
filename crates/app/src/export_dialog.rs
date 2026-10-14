@@ -13,7 +13,7 @@ use tableplus_core::driver::DynConnection;
 use tableplus_core::export::{
     CsvImportOptions, ExportFormat, ExportOptions, Exporter, csv_to_inserts, sql_script_statements,
 };
-use tableplus_core::model::{ColumnMeta, Row, SchemaObject, StatementResult};
+use tableplus_core::model::{ColumnMeta, Row, SchemaObject};
 use tableplus_core::sqlgen::{self, SortKey};
 
 use crate::app::{Action, ToastKind};
@@ -114,48 +114,40 @@ impl ExportDialog {
                 let conn = self.conn.clone();
                 let object = object.clone();
                 let where_clause = where_clause.clone();
-                let mut sort = sort.clone();
+                let sort = sort.clone();
                 self.task = Some(spawner.spawn(async move {
-                    // Page in a stable order: the user's sort, else the primary key.
-                    if sort.is_empty()
-                        && let Ok(st) = conn.table_structure(&object.schema, &object.name).await
-                    {
-                        sort = st.primary_key().into_iter().map(|c| SortKey { column: c, descending: false }).collect();
-                    }
-                    const PAGE: u64 = 10_000;
-                    let mut offset = 0;
+                    // One streaming query: rows flow to the file in batches, so memory stays
+                    // flat and no LIMIT/OFFSET paging (or total ordering) is needed.
+                    let sql = sqlgen::select_page_sql(
+                        dialect,
+                        &object.schema,
+                        &object.name,
+                        where_clause.as_deref(),
+                        &sort,
+                        None,
+                        0,
+                    );
                     let file = std::fs::File::create(&path).with_context(|| format!("creating {}", path.display()))?;
-                    let mut exporter: Option<Exporter<BufWriter<std::fs::File>>> = None;
                     let mut file = Some(file);
-                    loop {
-                        let sql = sqlgen::select_page_sql(
-                            dialect,
-                            &object.schema,
-                            &object.name,
-                            where_clause.as_deref(),
-                            &sort,
-                            Some(PAGE),
-                            offset,
-                        );
-                        let rs = match conn.query(&sql, None).await? {
-                            StatementResult::Rows(rs) => rs,
-                            StatementResult::Affected(_) => anyhow::bail!("export query returned no rows"),
-                        };
+                    let mut exporter: Option<Exporter<BufWriter<std::fs::File>>> = None;
+                    let mut written = 0u64;
+                    conn.query_batches(&sql, 5_000, &mut |cols, rows| {
                         if exporter.is_none() {
-                            let cols = rs.columns.iter().map(|c| c.name.clone()).collect();
+                            let names = cols.iter().map(|c| c.name.clone()).collect();
                             exporter =
-                                Some(Exporter::new(BufWriter::new(file.take().expect("file")), opts.clone(), cols)?);
+                                Some(Exporter::new(BufWriter::new(file.take().expect("file")), opts.clone(), names)?);
                         }
-                        let n = rs.rows.len() as u64;
                         let ex = exporter.as_mut().expect("exporter");
-                        ex.write_rows(rs.rows.iter().map(|r| &r[..]))?;
-                        offset += n;
-                        progress.store(offset, Ordering::Relaxed);
-                        if n < PAGE {
-                            break;
-                        }
+                        ex.write_rows(rows.iter().map(|r| &r[..]))?;
+                        written += rows.len() as u64;
+                        progress.store(written, Ordering::Relaxed);
+                        Ok(())
+                    })
+                    .await?;
+                    match exporter {
+                        Some(ex) => ex.finish(),
+                        None => Ok(0),
                     }
-                    exporter.expect("exporter").finish()
                 }));
             }
         }

@@ -41,6 +41,7 @@ runs on Linux, which is where the screenshots below were taken (Xvfb, software r
 - Syntax highlighting for each dialect, line numbers
 - Autocomplete for keywords, functions, schemas, tables and columns — alias-aware (`u.` lists the columns of `users u`), and quiet inside comments and strings
 - Run the statement under the cursor or the selection (`⌘↩`), or everything (`⌘⇧↩`); one result tab per statement plus a Messages tab with timings, affected rows and errors pointing at the failing statement
+- Explain (`⌘E`) shows the planner's estimates without running the statement; Explain Analyze (`⌘⇧E`) runs it and measures each step. MySQL 8.0.18 and later plans appear as a collapsible tree with estimated and actual rows, loops, time bars that split a step's own time from its children's, flags where actual rows are 10× off the estimate, and a detail panel with every value the server reported. A hand-typed `EXPLAIN` gets the same view. Other engines show the server's plan output for now. Explain Analyze shows the estimated plan instead of running a statement that writes (`INSERT`, `UPDATE`, `DELETE`, a data-changing CTE, `SELECT … INTO`)
 - Query history per connection, searchable, reopenable
 - Results are capped (100,000 rows by default) and can be cancelled
 
@@ -129,6 +130,9 @@ TABLEPLUS_RS_HOME=/tmp/tp-demo cargo run --release
 | `⌘⇧]` / `⌘⇧[`, `Ctrl+Tab` | Next / previous tab |
 | `⌘↩` | Run current statement (or selection) |
 | `⌘⇧↩` | Run all statements |
+| `⌘E` | Explain the current statement (estimated plan) |
+| `⌘⇧E` | Explain Analyze (runs the statement and measures its plan) |
+| `←` / `→`, `↑` / `↓`, `Space` | In a plan: collapse / expand, move, toggle |
 | `⌘S` | Commit staged changes |
 | `⌘R` | Reload |
 | `⌘F` | Filter rows |
@@ -150,7 +154,9 @@ The integration tests (`crates/core/tests/`) run against the real servers: intro
 schemas/tables/views/routines/indexes/constraints, every column type round-tripping through the
 grid's text representation, staged edits committed and rolled back, `ALTER` generation applied to
 real tables, CSV import, streaming 250,000 rows, query cancellation, TLS, and connecting through the
-SSH bastion. CI (`.github/workflows/ci.yml`) runs rustfmt, clippy with `-D warnings` and the full
+SSH bastion. `explain_goldens.rs` parses EXPLAIN output captured from 18 server versions by the
+separate EXPLAIN lab (`tableplus-rs-explain-lab`, checked out next to this repository or named by
+`TABLEPLUS_EXPLAIN_LAB`); without it those tests skip. CI (`.github/workflows/ci.yml`) runs rustfmt, clippy with `-D warnings` and the full
 suite against the docker databases on Linux, and builds, unit-tests and bundles the app on macOS.
 
 ## Performance
@@ -178,6 +184,8 @@ crates/core   tableplus-core — no UI code
   sqlgen.rs     SELECT/COUNT with filters, sorting and paging; UPDATE/INSERT/DELETE for staged edits
   alter.rs      structure diff → ALTER TABLE / CREATE INDEX / COMMENT per dialect
   sqltext.rs    lexer shared by highlighting, statement splitting and completion
+  plan/         query plans: one tree model for every engine, the EXPLAIN statement per engine
+                and version, and the parsers (MySQL TREE so far)
   completion.rs context-aware autocomplete (tables, aliases, columns, keywords, functions)
   export.rs     CSV / JSON / INSERT writers, CSV → INSERT import
   config.rs, store.rs, secrets.rs   saved connections, history, Keychain / 0600 secrets file
@@ -186,6 +194,7 @@ crates/app    the egui application (binary: tableplus-rs)
   grid.rs       virtualized data grid;  staged.rs  staged edits
   table_tab.rs  data + structure tabs;  structure.rs  structure editor
   query_tab.rs  SQL editor + result tabs;  editor.rs  code editor with highlighting and completion
+  plan_view.rs  plan tree with time bars and a detail panel, painted like the grid
   sidebar.rs, quick_open.rs, welcome.rs, conn_dialog.rs, export_dialog.rs, theme.rs, …
 ```
 

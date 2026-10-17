@@ -101,6 +101,28 @@ directory with `0600` permissions. Connections can also be set to ask for the pa
 - **TLS** uses `native-tls`, i.e. Security.framework on macOS and OpenSSL on Linux, so the system
   trust store and its updates are used. Modes mirror libpq (`disable` … `verify-full`).
 
+## Query plans
+
+EXPLAIN output differs per engine and per version: MySQL prints a text tree (TREE format, and the
+default on 9.x), MariaDB and PostgreSQL print JSON, and SQLite returns rows with no numbers. The
+EXPLAIN lab captured 387 outputs from 18 servers to pin these down. The app reads them into one
+model (`plan/`), so the views never branch on the engine:
+
+- A plan is a tree of steps. Each step has an operation, the object and index it reads, a
+  condition, an optional estimate (rows per loop, cost) and optional actuals (rows per loop, loops,
+  and per-loop time to the first and last row). The first-row time is optional because MariaDB
+  reports durations only. Every raw key and value is kept for the detail panel.
+- Inclusive time, self time and the estimate ratio are derived in core, not stored, so every view
+  agrees. Self time passes through steps the server didn't time, such as MySQL's `-> Hash`. A
+  MySQL estimate of `rows=0` means "not estimated" (temporary tables), so it is never flagged.
+- Which statement asks for a plan is a table of rules by engine, mode and minimum version, built
+  from the lab's capability matrix. Explain Analyze falls back to the estimate, with a note, where
+  the server can't measure (MySQL before 8.0.18, SQLite) and for statements that would change
+  data. Running an UPDATE to time it is never worth the surprise.
+- Parsers recognize their format from the result's shape, not from which button ran it, so a
+  hand-typed `EXPLAIN ANALYZE` gets the plan view too. Formats without a parser fall back to the
+  server's raw text.
+
 ## Scope cuts
 
 - **Redis and MongoDB** (stretch goals) were not implemented. They aren't relational: they need a key

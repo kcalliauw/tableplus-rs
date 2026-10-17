@@ -321,6 +321,8 @@ fn raw_view(ui: &mut Ui, id: Id, text: &str) {
 /// The right-hand number and bar columns, which stay put while the tree scrolls sideways.
 struct Columns {
     analyzed: bool,
+    /// Off when no step has a number, as in SQLite's plans; the tree then takes the full width.
+    shown: bool,
     /// The bar gives up width first when the pane is narrow, so step names stay readable.
     bar: f32,
 }
@@ -332,8 +334,10 @@ impl Columns {
     const TIME: f32 = 74.0;
     const COST: f32 = 74.0;
 
-    fn new(analyzed: bool, pane_width: f32) -> Self {
-        let mut cols = Self { analyzed, bar: 0.0 };
+    fn new(plan: &Plan, pane_width: f32) -> Self {
+        let analyzed = plan.analyzed();
+        let shown = analyzed || plan.nodes().any(|(_, n)| n.estimate.is_some());
+        let mut cols = Self { analyzed, shown, bar: 0.0 };
         cols.bar = (pane_width - cols.numbers() - 2.0 * PAD - 420.0).clamp(96.0, 176.0);
         cols
     }
@@ -343,6 +347,9 @@ impl Columns {
     }
 
     fn width(&self) -> f32 {
+        if !self.shown {
+            return 0.0;
+        }
         self.numbers() + self.bar + 2.0 * PAD
     }
 }
@@ -361,7 +368,7 @@ fn tree(ui: &mut Ui, id: Id, view: &mut PlanView) {
     }
     let Some(plan) = view.plan() else { return };
     let analyzed = plan.analyzed();
-    let cols = Columns::new(analyzed, ui.available_width());
+    let cols = Columns::new(plan, ui.available_width());
     let rows = view.visible.len();
     let max_depth = view.visible.iter().map(|n| plan.depth(*n)).max().unwrap_or(0) as f32;
 
@@ -514,6 +521,9 @@ fn tree(ui: &mut Ui, id: Id, view: &mut PlanView) {
                 tp.galley(pill.center() - g.size() / 2.0, g, color);
             }
 
+            if !cols.shown {
+                continue;
+            }
             // Number columns, painted over the row so long step text ends under them.
             np.rect_filled(
                 Rect::from_min_max(pos2(metrics_left, y), pos2(clip.right(), y + ROW_H)),
@@ -578,13 +588,16 @@ fn tree(ui: &mut Ui, id: Id, view: &mut PlanView) {
         let header = Rect::from_min_size(clip.min, vec2(clip.width(), HEADER_H));
         painter.rect_filled(header, CornerRadius::ZERO, p.header_bg);
         painter.line_segment([header.left_bottom(), header.right_bottom()], Stroke::new(1.0, p.border));
+        let head_font = theme::bold_font(12.0);
+        let hy = header.center().y;
+        painter.text(pos2(clip.left() + PAD + 4.0, hy), Align2::LEFT_CENTER, "Step", head_font.clone(), p.text);
+        if !cols.shown {
+            return;
+        }
         painter.line_segment(
             [pos2(metrics_left, clip.top()), pos2(metrics_left, clip.bottom())],
             Stroke::new(1.0, p.grid_line),
         );
-        let head_font = theme::bold_font(12.0);
-        let hy = header.center().y;
-        painter.text(pos2(clip.left() + PAD + 4.0, hy), Align2::LEFT_CENTER, "Step", head_font.clone(), p.text);
         let head = |left: f32, w: f32, text: &str| {
             painter.text(pos2(left + w - 8.0, hy), Align2::RIGHT_CENTER, text, head_font.clone(), p.text);
         };

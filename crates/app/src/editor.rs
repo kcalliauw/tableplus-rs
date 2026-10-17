@@ -87,6 +87,7 @@ impl CodeEditor {
 
     pub fn close_popup(&mut self) {
         self.popup = None;
+        self.retry_at = None;
     }
 
     pub fn show(
@@ -132,7 +133,7 @@ impl CodeEditor {
                 }
             });
             if close {
-                self.popup = None;
+                self.close_popup();
             }
         }
         if let Some(s) = accept
@@ -219,9 +220,7 @@ impl CodeEditor {
                         && text.len() > self.last_text_len
                         && text[..primary].chars().last().is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '.');
                     let retry = !changed && self.retry_at == Some(primary);
-                    if changed || self.retry_at != Some(primary) {
-                        self.retry_at = None;
-                    }
+                    self.retry_at = None;
                     if (typed_ident || force_complete || retry || (self.popup.is_some() && changed))
                         && output.response.has_focus()
                     {

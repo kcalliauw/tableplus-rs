@@ -17,10 +17,11 @@
 //!
 //! # Timing
 //!
-//! SQLite doesn't time steps. It counts CPU cycles on a hardware counter for each VDBE
-//! instruction and sums them per step. A step's time here is its share of the statement's
-//! cycles, scaled to the statement's measured time (`ms`, the time spent in `sqlite3_step`).
-//! The format label and the plan's `timing` attribute say so.
+//! SQLite doesn't time steps. It reads a hardware counter around each VDBE instruction (the
+//! time-stamp counter on x86, the virtual timer on ARM), calls the difference cycles, and sums
+//! them per step. A step's time here is its share of the statement's cycles, scaled to the
+//! statement's measured time (`ms`, the time spent in `sqlite3_step`). The format label and the
+//! plan's `timing` attribute say so.
 //!
 //! What a step's `ncycle` covers depends on the step:
 //!
@@ -36,9 +37,15 @@
 //! - `MATERIALIZE` counts its code range but no loops, so it carries no actuals. Its children
 //!   keep their times, and its own work shows as its parent's self time.
 //!
-//! A correlated subquery reads the outer loop's columns inside its own code range, so those few
-//! instructions count for both steps. The parts of a step can then add up to slightly more than
-//! the whole, and its self time stays at zero.
+//! Some instructions still count for two steps, and nothing in the counters says which:
+//!
+//! - A correlated subquery reads the outer loop's columns inside its own code range.
+//! - A sort's range covers the code that fills and empties it, which can compute select-list
+//!   columns, so a scalar subquery in the select list counts on the sort as well as on itself.
+//!   In the lab's `portable` query, `USE TEMP B-TREE FOR ORDER BY` reports about 190,000
+//!   cycles, of which about 167,000 are `CORRELATED SCALAR SUBQUERY 1`.
+//!
+//! The parts of a step can then add up to more than the whole, and its self time stays at zero.
 
 use std::collections::HashMap;
 

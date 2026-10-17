@@ -68,6 +68,8 @@ enum Mode {
 struct Metrics {
     inclusive_ms: Option<f64>,
     self_ms: Option<f64>,
+    /// The planner's total cost, without MySQL's placeholder.
+    cost: Option<f64>,
     descendants: usize,
 }
 
@@ -118,14 +120,14 @@ impl PlanView {
                 .map(|(id, _)| Metrics {
                     inclusive_ms: plan.inclusive_ms(id),
                     self_ms: plan.self_ms(id),
+                    cost: plan.estimated_cost(id).map(|c| c.total),
                     descendants: plan.descendant_count(id),
                 })
                 .collect();
-            // Normally the root's time; MySQL 8.0.18 can time a materialization above its root.
             view.scale = if plan.analyzed() {
-                view.metrics.iter().filter_map(|m| m.inclusive_ms).fold(plan.total_ms().unwrap_or(0.0), f64::max)
+                plan.total_ms().unwrap_or(0.0)
             } else {
-                plan.nodes().filter_map(|(_, n)| n.estimate?.cost.map(|c| c.total)).fold(0.0, f64::max)
+                view.metrics.iter().filter_map(|m| m.cost).fold(0.0, f64::max)
             };
             view.flame = Flame::new(plan);
             view.rebuild_visible();
@@ -154,6 +156,7 @@ impl PlanView {
                 let steps = widgets::plural(plan.node_count() as u64, "step");
                 match plan.total_ms() {
                     Some(ms) => format!("{steps} · {}", fmt_ms(ms)),
+                    None if plan.analyzed() => steps,
                     None => format!("{steps} · estimated"),
                 }
             }
@@ -589,19 +592,25 @@ fn tree(ui: &mut Ui, id: Id, view: &mut PlanView) {
             let number = |left: f32, w: f32, text: &str, color: Color32| {
                 np.text(pos2(left + w - 8.0, cy), Align2::RIGHT_CENTER, text, num_font.clone(), color).width()
             };
+            // A dash where the server printed a placeholder rather than a number.
+            let estimated = |left: f32, w: f32, value: Option<f64>, color: Color32| {
+                if let Some(v) = value {
+                    number(left, w, &fmt_rows(v), color);
+                } else if node.estimate.is_some() {
+                    number(left, w, "–", faint);
+                }
+            };
             let mut cx = metrics_left + PAD;
-            if let Some(est) = node.estimate {
-                number(cx, Columns::EST, &fmt_rows(est.rows), weak);
-            }
+            estimated(cx, Columns::EST, plan.estimated_rows(node_id), weak);
             cx += Columns::EST;
             if analyzed {
                 if let Some(actual) = node.actual {
-                    let misestimated = node.is_misestimated();
+                    let misestimated = plan.is_misestimated(node_id);
                     let text =
                         if actual.loops == 0 { Some("never ran".to_string()) } else { actual.rows.map(fmt_rows) };
                     let color = if misestimated && !on_accent { p.warning } else { strong };
                     let text_w = text.map_or(0.0, |text| number(cx, Columns::ROWS, &text, color));
-                    if misestimated && let Some(ratio) = node.row_estimate_ratio() {
+                    if misestimated && let Some(ratio) = plan.row_estimate_ratio(node_id) {
                         let right = cx + Columns::ROWS - 8.0 - text_w - 5.0;
                         misestimate_badge(
                             &np,
@@ -619,9 +628,7 @@ fn tree(ui: &mut Ui, id: Id, view: &mut PlanView) {
                 }
                 cx += Columns::TIME;
             } else {
-                if let Some(cost) = node.estimate.and_then(|e| e.cost) {
-                    number(cx, Columns::COST, &fmt_rows(cost.total), strong);
-                }
+                estimated(cx, Columns::COST, m.cost, strong);
                 cx += Columns::COST;
             }
             let bar = Rect::from_min_size(pos2(cx + 4.0, cy - BAR_H / 2.0), vec2(cols.bar - 12.0, BAR_H));
@@ -846,7 +853,7 @@ fn paint_bar(
     } else {
         (p.plan_bar_track, p.plan_cost, p.plan_cost)
     };
-    let has_value = if analyzed { m.inclusive_ms.is_some() } else { node.estimate.is_some_and(|e| e.cost.is_some()) };
+    let has_value = if analyzed { m.inclusive_ms.is_some() } else { m.cost.is_some() };
     if !has_value || scale <= 0.0 {
         return;
     }
@@ -876,8 +883,8 @@ fn paint_bar(
             let tick = if on_accent { p.accent_text } else { p.plan_tick };
             painter.line_segment([pos2(x, bar.top() - 3.0), pos2(x, bar.bottom() + 3.0)], Stroke::new(1.5, tick));
         }
-    } else if let Some(cost) = node.estimate.and_then(|e| e.cost) {
-        segment(width(cost.total), fill);
+    } else if let Some(cost) = m.cost {
+        segment(width(cost), fill);
     }
 }
 
@@ -913,9 +920,8 @@ fn bar_tooltip(node: &PlanNode, m: &Metrics, scale: f64, analyzed: bool) -> Opti
         }
         Some(tip)
     } else {
-        let cost = node.estimate?.cost?;
-        (scale > 0.0)
-            .then(|| format!("Cost {}, {:.0}% of the costliest step", fmt_rows(cost.total), 100.0 * cost.total / scale))
+        let cost = m.cost?;
+        (scale > 0.0).then(|| format!("Cost {}, {:.0}% of the costliest step", fmt_rows(cost), 100.0 * cost / scale))
     }
 }
 
@@ -991,9 +997,11 @@ fn detail(ui: &mut Ui, view: &PlanView, id: NodeId, open: &mut bool) {
                     facts.push(("Rows in all loops", fmt_rows(rows * actual.loops as f64), None));
                 }
             }
-            if let Some(est) = node.estimate {
-                facts.push(("Estimated rows per loop", fmt_rows(est.rows), None));
-                if let Some(cost) = est.cost {
+            if node.estimate.is_some() {
+                let rows = plan.estimated_rows(id);
+                let faint = rows.is_none().then_some(p.text_faint);
+                facts.push(("Estimated rows per loop", rows.map_or_else(|| "not estimated".into(), fmt_rows), faint));
+                if let Some(cost) = plan.estimated_cost(id) {
                     let text = match cost.startup {
                         Some(s) if s != cost.total => {
                             format!("{} to first row, {} total", fmt_rows(s), fmt_rows(cost.total))
@@ -1003,14 +1011,14 @@ fn detail(ui: &mut Ui, view: &PlanView, id: NodeId, open: &mut bool) {
                     facts.push(("Estimated cost", text, None));
                 }
             }
-            if let Some(ratio) = node.row_estimate_ratio() {
+            if let Some(ratio) = plan.row_estimate_ratio(id) {
                 let (factor, way) = if ratio >= 1.0 { (ratio, "more") } else { (1.0 / ratio, "fewer") };
                 let text = if factor < 1.05 {
                     "on target".to_string()
                 } else {
                     format!("{}× {way} rows than estimated", fmt_factor(factor))
                 };
-                facts.push(("Estimate", text, node.is_misestimated().then_some(p.warning)));
+                facts.push(("Estimate", text, plan.is_misestimated(id).then_some(p.warning)));
             }
             if m.descendants > 0 {
                 facts.push(("Steps below", fmt_count(m.descendants as u64), None));

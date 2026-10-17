@@ -82,6 +82,8 @@ pub struct Flame {
     bars: Vec<Bar>,
     /// Steps by depth, left to right.
     rows: Vec<Vec<NodeId>>,
+    /// The statement's time, [`Plan::total_ms`], which shares are of. The root bar can span
+    /// more, when steps below report more than any one step covers.
     total_ms: f64,
     camera: Camera,
     /// When the chart was first drawn; its rows unfold from there.
@@ -148,13 +150,9 @@ impl Flame {
         let ids: Vec<NodeId> = plan.nodes().map(|(id, _)| id).collect();
         // Each bar is as wide as the step's time or the steps below it, whichever is more, and a
         // step the server didn't time, such as MySQL's `-> Hash`, is as wide as the steps below.
-        let mut time = vec![0.0; ids.len()];
-        for id in ids.iter().rev() {
-            let below: f64 = plan.children(*id).iter().map(|c| time[c.index()]).sum();
-            time[id.index()] = plan.inclusive_ms(*id).map_or(below, |ms| ms.max(below));
-        }
-        let total_ms = time[NodeId::ROOT.index()];
-        if !plan.analyzed() || total_ms <= 0.0 {
+        let time = plan.spans(|id| plan.inclusive_ms(id));
+        let total_ms = plan.total_ms().unwrap_or(0.0);
+        if !plan.analyzed() || time[NodeId::ROOT.index()] <= 0.0 {
             return None;
         }
         let mut bars: Vec<Bar> =
@@ -628,8 +626,10 @@ fn tooltip(ui: &mut Ui, plan: &Plan, id: NodeId, bar: &Bar, total_ms: f64) {
                 fact("Loops", fmt_count(actual.loops));
             }
         }
-        if let Some(est) = node.estimate {
-            fact("Estimated rows", fmt_rows(est.rows));
+        match plan.estimated_rows(id) {
+            Some(rows) => fact("Estimated rows", fmt_rows(rows)),
+            None if node.estimate.is_some() => fact("Estimated rows", "not estimated".into()),
+            None => {}
         }
     });
     let note = |ui: &mut Ui, text: String, color: Color32| {
@@ -926,8 +926,10 @@ mod tests {
         let root = &flame.bars[0];
         assert_eq!(root.stretched, Some(8.0));
         assert!(close(root.own, 0.0));
-        assert!(close(flame.total_ms, 8.0));
-        assert!(close(flame.bars[a.index()].heat.unwrap(), 0.75));
+        // Shares are of the longest step, as in the tree and the summary.
+        assert!(close(flame.total_ms, 6.0));
+        assert!(close(flame.bars[a.index()].heat.unwrap(), 1.0));
+        assert!(close(flame.bars[b.index()].heat.unwrap(), 2.0 / 6.0));
         // A stretched step widens its parent only as far as the parent's own time allows.
         let mut plan = Plan::new(PlanFormat::MySqlTree, timed("join", 10.0, 1), "");
         let x = plan.add_child(NodeId::ROOT, timed("lookup", 1.0, 1));

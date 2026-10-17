@@ -56,6 +56,8 @@ struct Step {
     /// Share of the statement's time with and without the steps below, or of the costliest
     /// step's cost.
     bar: Option<(f32, f32)>,
+    /// `Estimated 1,616 rows, cost 757`, for the tooltip.
+    estimate: Option<String>,
     misestimate: Option<f64>,
     descendants: usize,
 }
@@ -325,9 +327,9 @@ fn ease_out(t: f32) -> f32 {
 fn prepare(plan: &Plan, collapsed: &[bool]) -> Prepared {
     let analyzed = plan.analyzed();
     let scale = if analyzed {
-        plan.nodes().filter_map(|(id, _)| plan.inclusive_ms(id)).fold(plan.total_ms().unwrap_or(0.0), f64::max)
+        plan.total_ms().unwrap_or(0.0)
     } else {
-        plan.nodes().filter_map(|(_, n)| n.estimate?.cost.map(|c| c.total)).fold(0.0, f64::max)
+        plan.nodes().filter_map(|(id, _)| plan.estimated_cost(id).map(|c| c.total)).fold(0.0, f64::max)
     };
     let share = |v: f64| if scale > 0.0 { (v / scale).clamp(0.0, 1.0) as f32 } else { 0.0 };
     let steps: Vec<Step> = plan
@@ -344,13 +346,19 @@ fn prepare(plan: &Plan, collapsed: &[bool]) -> Prepared {
                 let bar = inclusive.map(|t| (share(t), share(plan.self_ms(id).unwrap_or(0.0))));
                 (rows, loops, inclusive.map(fmt_ms), bar)
             } else {
-                let rows = node.estimate.filter(|e| e.rows > 0.0).map(|e| format!("≈ {}", rows_text(e.rows)));
-                // MySQL prints `cost=0 rows=0` on steps it doesn't estimate.
-                let cost = node.estimate.and_then(|e| e.cost.filter(|c| e.rows > 0.0 || c.total > 0.0));
+                let rows = plan.estimated_rows(id).map(|rows| format!("≈ {}", rows_text(rows)));
+                let cost = plan.estimated_cost(id);
                 let bar = cost.map(|c| (share(c.total), 0.0));
                 (rows.unwrap_or_default(), None, cost.map(|c| format!("cost {}", fmt_rows(c.total))), bar)
             };
+            let estimate_parts: Vec<String> = plan
+                .estimated_rows(id)
+                .map(rows_text)
+                .into_iter()
+                .chain(plan.estimated_cost(id).map(|c| format!("cost {}", fmt_rows(c.total))))
+                .collect();
             Step {
+                estimate: (!estimate_parts.is_empty()).then(|| format!("Estimated {}", estimate_parts.join(", "))),
                 access: node.access(),
                 join: node.is_join(),
                 flow: flow(plan, id, analyzed),
@@ -358,7 +366,7 @@ fn prepare(plan: &Plan, collapsed: &[bool]) -> Prepared {
                 loops,
                 value,
                 bar,
-                misestimate: node.row_estimate_ratio().filter(|_| node.is_misestimated()),
+                misestimate: plan.row_estimate_ratio(id).filter(|_| plan.is_misestimated(id)),
                 descendants: plan.descendant_count(id),
             }
         })
@@ -388,18 +396,15 @@ fn rows_text(rows: f64) -> String {
 }
 
 /// Rows a step passes up over all its loops, or its estimate per loop. A step without numbers,
-/// such as MySQL's `Hash`, passes on what its children produce. MySQL estimates zero rows for
-/// steps it doesn't estimate, such as temporary tables, so those carry no number.
+/// such as MySQL's `Hash`, passes on what its children produce. A step MySQL marks as not
+/// estimated carries no number: the steps below a limit say nothing about what it returns.
 fn flow(plan: &Plan, id: NodeId, analyzed: bool) -> Option<f64> {
     let node = plan.node(id);
-    let own = if analyzed {
-        node.actual.and_then(|a| a.rows.map(|r| r * a.loops as f64))
-    } else {
-        node.estimate.map(|e| e.rows)
-    };
+    let own =
+        if analyzed { node.actual.and_then(|a| a.rows.map(|r| r * a.loops as f64)) } else { plan.estimated_rows(id) };
     match own {
-        Some(rows) if analyzed || rows > 0.0 => Some(rows),
-        Some(_) => None,
+        Some(rows) => Some(rows),
+        None if !analyzed && node.estimate.is_some() => None,
         None => {
             let below: Vec<f64> = plan.children(id).iter().filter_map(|c| flow(plan, *c, analyzed)).collect();
             (!below.is_empty()).then(|| below.iter().sum())

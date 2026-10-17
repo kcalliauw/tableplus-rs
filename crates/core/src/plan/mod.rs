@@ -160,24 +160,6 @@ impl PlanNode {
             depth: 0,
         }
     }
-
-    /// Actual rows divided by estimated rows, per loop. Both count as at least one row, so a
-    /// guess of 0.3 rows that turns out to be 0.03 is not a misestimate. `None` without both
-    /// numbers, when the node never ran, or for an estimate of exactly zero, which MySQL prints
-    /// for steps it doesn't estimate (temporary tables, and the sort and limit above them).
-    pub fn row_estimate_ratio(&self) -> Option<f64> {
-        let estimated = self.estimate?.rows;
-        if estimated == 0.0 {
-            return None;
-        }
-        let actual = self.actual.filter(|a| a.loops > 0)?.rows?;
-        Some(actual.max(1.0) / estimated.max(1.0))
-    }
-
-    /// The actual rows are at least [`MISESTIMATE_FACTOR`] times above or below the estimate.
-    pub fn is_misestimated(&self) -> bool {
-        self.row_estimate_ratio().is_some_and(|r| r >= MISESTIMATE_FACTOR || r <= 1.0 / MISESTIMATE_FACTOR)
-    }
 }
 
 /// A parsed plan: a tree of [`PlanNode`]s whose root is [`NodeId::ROOT`].
@@ -243,6 +225,41 @@ impl Plan {
         self.nodes.iter().any(|n| n.actual.is_some())
     }
 
+    /// MySQL prints `rows=0`, and often `cost=0`, on steps it doesn't estimate: temporary tables,
+    /// and the sort and limit above them. Elsewhere zero rows is a real estimate, such as
+    /// PostgreSQL's for an UPDATE without RETURNING.
+    fn unestimated(&self, estimate: &Estimate) -> bool {
+        estimate.rows == 0.0
+            && matches!(self.format, PlanFormat::MySqlTree | PlanFormat::MySqlJson | PlanFormat::MySqlJsonV2)
+    }
+
+    /// Rows per loop the planner expected; `None` when it estimated none, MySQL's `rows=0`
+    /// placeholder included.
+    pub fn estimated_rows(&self, id: NodeId) -> Option<f64> {
+        let estimate = self.node(id).estimate?;
+        (!self.unestimated(&estimate)).then_some(estimate.rows)
+    }
+
+    /// The planner's cost, without the `cost=0` MySQL prints beside its `rows=0` placeholder.
+    pub fn estimated_cost(&self, id: NodeId) -> Option<Cost> {
+        let estimate = self.node(id).estimate?;
+        estimate.cost.filter(|c| c.total != 0.0 || !self.unestimated(&estimate))
+    }
+
+    /// Actual rows divided by estimated rows, per loop. Both count as at least one row, so a
+    /// guess of 0.3 rows that turns out to be 0.03 is not a misestimate. `None` without both
+    /// numbers or when the step never ran.
+    pub fn row_estimate_ratio(&self, id: NodeId) -> Option<f64> {
+        let estimated = self.estimated_rows(id)?;
+        let actual = self.node(id).actual.filter(|a| a.loops > 0)?.rows?;
+        Some(actual.max(1.0) / estimated.max(1.0))
+    }
+
+    /// The actual rows are at least [`MISESTIMATE_FACTOR`] times above or below the estimate.
+    pub fn is_misestimated(&self, id: NodeId) -> bool {
+        self.row_estimate_ratio(id).is_some_and(|r| r >= MISESTIMATE_FACTOR || r <= 1.0 / MISESTIMATE_FACTOR)
+    }
+
     /// Milliseconds spent in the node and its children over all loops: the time to the last row
     /// per loop, times the loop count.
     pub fn inclusive_ms(&self, id: NodeId) -> Option<f64> {
@@ -257,9 +274,28 @@ impl Plan {
         Some((self.inclusive_ms(id)? - self.children_ms(id)).max(0.0))
     }
 
-    /// The whole statement's measured time: the root's inclusive time, or its children's.
+    /// The statement's measured time: the longest any step reports, counting a step the server
+    /// didn't time as the steps below it. Usually the root's, but MySQL 8.0.18 reports 70 µs
+    /// for the limit above a union whose materialization takes milliseconds. `None` when no
+    /// step was timed.
     pub fn total_ms(&self) -> Option<f64> {
-        self.inclusive_ms(NodeId::ROOT).or_else(|| Some(self.children_ms(NodeId::ROOT)).filter(|ms| *ms > 0.0))
+        let longest = self.nodes().map(|(id, _)| self.inclusive_ms(id).unwrap_or_else(|| self.children_ms(id)));
+        let timed = self.nodes.iter().any(|n| n.actual.and_then(|a| a.time).is_some());
+        timed.then(|| longest.fold(0.0, f64::max))
+    }
+
+    /// Each step's `value`, or what the steps below it report in all when that is more, by
+    /// node index. A step without a value spans the steps below it. Nested numbers don't always
+    /// add up: MySQL leaves a temporary table's cost out of the steps that read it, and times
+    /// steps separately, averaged over loops.
+    pub fn spans(&self, value: impl Fn(NodeId) -> Option<f64>) -> Vec<f64> {
+        let mut spans = vec![0.0; self.nodes.len()];
+        // Children come after their parent, so walking backwards sees them first.
+        for i in (0..self.nodes.len()).rev() {
+            let below: f64 = self.nodes[i].children.iter().map(|c| spans[c.0]).sum();
+            spans[i] = value(NodeId(i)).map_or(below, |v| v.max(below));
+        }
+        spans
     }
 
     fn children_ms(&self, id: NodeId) -> f64 {
@@ -394,6 +430,34 @@ mod tests {
     }
 
     #[test]
+    fn total_time_is_the_longest_step_not_the_root() {
+        // MySQL 8.0.18: `Limit` 72 µs over a union materialized in 14.6 ms, from branches of
+        // 9.53 and 5.01 ms. A dependent subquery's 4 ms is already inside the first branch.
+        let mut plan = Plan::new(PlanFormat::MySqlTree, timed("limit", 0.0, 0.072, 20.0, 1), "");
+        let scan = plan.add_child(NodeId::ROOT, timed("scan union temporary", 0.0, 0.009, 67.0, 1));
+        let union = plan.add_child(scan, timed("union materialize", 14.5, 14.6, 20.0, 1));
+        plan.add_child(union, timed("filter", 4.0, 9.53, 49.0, 1));
+        let subquery = plan.add_child(union, PlanNode::new("select #2"));
+        plan.add_child(subquery, timed("aggregate", 0.0, 0.014, 1.0, 287));
+        plan.add_child(union, timed("filter", 1.9, 5.01, 18.0, 1));
+        assert_eq!(plan.total_ms(), Some(14.6));
+        assert!(plan.nodes().all(|(id, _)| plan.inclusive_ms(id).is_none_or(|ms| ms <= 14.6)));
+    }
+
+    #[test]
+    fn spans_cover_steps_below_that_report_more() {
+        let mut plan = Plan::new(PlanFormat::MySqlTree, PlanNode::new("limit"), "");
+        let union = plan.add_child(NodeId::ROOT, PlanNode::new("union"));
+        let a = plan.add_child(union, PlanNode::new("a"));
+        plan.add_child(a, PlanNode::new("a1"));
+        plan.add_child(union, PlanNode::new("b"));
+        // limit 2.85 · union none · a 757 over a1 909 · b 31,389
+        let values = [Some(2.85), None, Some(757.0), Some(909.0), Some(31389.0)];
+        assert_eq!(plan.spans(|id| values[id.index()]), [32298.0, 32298.0, 909.0, 909.0, 31389.0]);
+        assert_eq!(plan.spans(|_| None), [0.0; 5]);
+    }
+
+    #[test]
     fn self_time_subtracts_children_through_untimed_nodes() {
         let (plan, [root, scan, hash, inner, _]) = sample();
         // 10 - (2 + 3 through the untimed hash + 100 × 0.01)
@@ -411,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn total_time_falls_back_to_children() {
+    fn total_time_counts_an_untimed_step_as_the_steps_below_it() {
         let mut plan = Plan::new(PlanFormat::MariaDbJson, PlanNode::new("union"), "");
         plan.add_child(NodeId::ROOT, timed("block", 0.0, 1.5, 10.0, 1));
         plan.add_child(NodeId::ROOT, timed("block", 0.0, 0.5, 10.0, 1));
@@ -426,22 +490,45 @@ mod tests {
         let with = |estimated: f64, actual: f64, loops: u64| {
             let mut n = timed("scan", 0.0, 1.0, actual, loops);
             n.estimate = Some(Estimate { rows: estimated, cost: None });
-            n
+            Plan::new(PlanFormat::MySqlTree, n, "")
         };
-        assert_eq!(with(10.0, 100.0, 1).row_estimate_ratio(), Some(10.0));
-        assert!(with(10.0, 100.0, 1).is_misestimated());
-        assert!(with(1000.0, 99.0, 1).is_misestimated());
-        assert!(!with(1000.0, 101.0, 1).is_misestimated());
+        let ratio = |plan: Plan| plan.row_estimate_ratio(NodeId::ROOT);
+        let misestimated = |plan: Plan| plan.is_misestimated(NodeId::ROOT);
+        assert_eq!(ratio(with(10.0, 100.0, 1)), Some(10.0));
+        assert!(misestimated(with(10.0, 100.0, 1)));
+        assert!(misestimated(with(1000.0, 99.0, 1)));
+        assert!(!misestimated(with(1000.0, 101.0, 1)));
         // MySQL's `rows=0` on a union's temporary table means no estimate.
-        assert_eq!(with(0.0, 67.0, 1).row_estimate_ratio(), None);
-        assert_eq!(with(0.5, 67.0, 1).row_estimate_ratio(), Some(67.0));
+        assert_eq!(ratio(with(0.0, 67.0, 1)), None);
+        assert_eq!(ratio(with(0.5, 67.0, 1)), Some(67.0));
         // Fractions of a row are not a misestimate.
-        assert!(!with(0.333, 0.01, 1083).is_misestimated());
-        assert_eq!(with(5.0, 0.0, 0).row_estimate_ratio(), None);
-        assert_eq!(timed("scan", 0.0, 1.0, 5.0, 1).row_estimate_ratio(), None);
+        assert!(!misestimated(with(0.333, 0.01, 1083)));
+        assert_eq!(ratio(with(5.0, 0.0, 0)), None);
+        assert_eq!(ratio(Plan::new(PlanFormat::MySqlTree, timed("scan", 0.0, 1.0, 5.0, 1), "")), None);
         let mut uncounted = with(10.0, 0.0, 1);
-        uncounted.actual.as_mut().unwrap().rows = None;
-        assert_eq!(uncounted.row_estimate_ratio(), None);
+        uncounted.nodes[0].actual.as_mut().unwrap().rows = None;
+        assert_eq!(ratio(uncounted), None);
+    }
+
+    #[test]
+    fn mysql_zero_rows_is_no_estimate_but_postgres_zero_is() {
+        let step = |format: PlanFormat, rows: f64, cost: f64| {
+            let mut n = PlanNode::new("step");
+            n.estimate = Some(Estimate { rows, cost: Some(Cost { startup: None, total: cost }) });
+            Plan::new(format, n, "")
+        };
+        let numbers =
+            |plan: Plan| (plan.estimated_rows(NodeId::ROOT), plan.estimated_cost(NodeId::ROOT).map(|c| c.total));
+        // `Union all materialize  (cost=0..0 rows=0)` and `Limit: 20 row(s)  (cost=2.85..2.85 rows=0)`.
+        for format in [PlanFormat::MySqlTree, PlanFormat::MySqlJson, PlanFormat::MySqlJsonV2] {
+            assert_eq!(numbers(step(format, 0.0, 0.0)), (None, None), "{format:?}");
+            assert_eq!(numbers(step(format, 0.0, 2.85)), (None, Some(2.85)), "{format:?}");
+            assert_eq!(numbers(step(format, 0.33, 0.66)), (Some(0.33), Some(0.66)), "{format:?}");
+        }
+        // PostgreSQL's `Update on products  (cost=0.00..44.18 rows=0)` returns nothing, by plan.
+        assert_eq!(numbers(step(PlanFormat::PostgresJson, 0.0, 44.18)), (Some(0.0), Some(44.18)));
+        assert_eq!(numbers(step(PlanFormat::PostgresJson, 0.0, 0.0)), (Some(0.0), Some(0.0)));
+        assert_eq!(numbers(Plan::new(PlanFormat::MySqlTree, PlanNode::new("Hash"), "")), (None, None));
     }
 
     #[test]

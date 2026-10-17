@@ -564,14 +564,8 @@ pub(super) fn tooltip(ui: &mut Ui, node: &PlanNode, step: &Step, analyzed: bool,
             facts.push(format!("{time} with the steps below"));
         }
     }
-    if let Some(est) = node.estimate {
-        // MySQL prints zero rows for steps it doesn't estimate.
-        let rows = (est.rows > 0.0).then(|| rows_text(est.rows));
-        let cost = est.cost.map(|c| format!("cost {}", fmt_rows(c.total)));
-        let parts: Vec<String> = rows.into_iter().chain(cost).collect();
-        if !parts.is_empty() {
-            facts.push(format!("Estimated {}", parts.join(", ")));
-        }
+    if let Some(estimate) = &step.estimate {
+        facts.push(estimate.clone());
     }
     if !facts.is_empty() {
         ui.add_space(2.0);

@@ -16,7 +16,7 @@ use tableplus_core::plan::{self, NodeId, Plan, PlanFormat, PlanNode};
 
 use crate::icons::Icon;
 use crate::theme::{self, Palette, palette};
-use crate::widgets::{self, fmt_count};
+use crate::widgets::{self, fmt_count, fmt_factor, fmt_ms, fmt_rows};
 
 const ROW_H: f32 = 26.0;
 const HEADER_H: f32 = 28.0;
@@ -967,63 +967,4 @@ fn detail(ui: &mut Ui, view: &PlanView, id: NodeId, open: &mut bool) {
 /// A step as `key: value` lines, for the clipboard.
 fn node_text(node: &PlanNode) -> String {
     node.attributes.iter().map(|a| format!("{}: {}", a.key, a.value)).collect::<Vec<_>>().join("\n")
-}
-
-/// `287`, `127,044`, `33.7`, `1.95`, `0.31`, `12.3M`.
-fn fmt_rows(n: f64) -> String {
-    if n >= 10_000_000.0 {
-        format!("{:.1}M", n / 1_000_000.0)
-    } else if n >= 100.0 || n.fract() == 0.0 {
-        fmt_count(n.round() as u64)
-    } else if n >= 10.0 {
-        format!("{n:.1}")
-    } else {
-        let s = format!("{n:.2}");
-        s.trim_end_matches('0').trim_end_matches('.').to_string()
-    }
-}
-
-/// `4.68 ms`, `61.2 ms`, `578 µs`, `1.24 s`.
-pub fn fmt_ms(ms: f64) -> String {
-    if ms >= 1000.0 {
-        format!("{:.2} s", ms / 1000.0)
-    } else if ms >= 100.0 {
-        format!("{ms:.0} ms")
-    } else if ms >= 10.0 {
-        format!("{ms:.1} ms")
-    } else if ms >= 1.0 {
-        format!("{ms:.2} ms")
-    } else if ms >= 0.0005 {
-        format!("{:.0} µs", ms * 1000.0)
-    } else if ms > 0.0 {
-        "<1 µs".into()
-    } else {
-        "0".into()
-    }
-}
-
-fn fmt_factor(f: f64) -> String {
-    if f >= 1000.0 { fmt_count(f.round() as u64) } else { format!("{f:.0}") }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn number_formats() {
-        assert_eq!(fmt_rows(287.0), "287");
-        assert_eq!(fmt_rows(127_044.0), "127,044");
-        assert_eq!(fmt_rows(33.7), "33.7");
-        assert_eq!(fmt_rows(1.95), "1.95");
-        assert_eq!(fmt_rows(0.31), "0.31");
-        assert_eq!(fmt_rows(0.889), "0.89");
-        assert_eq!(fmt_rows(0.0), "0");
-        assert_eq!(fmt_ms(4.68), "4.68 ms");
-        assert_eq!(fmt_ms(0.578), "578 µs");
-        assert_eq!(fmt_ms(244e-6), "<1 µs");
-        assert_eq!(fmt_ms(1240.0), "1.24 s");
-        assert_eq!(fmt_factor(67.2), "67");
-        assert_eq!(fmt_factor(4539.0), "4,539");
-    }
 }

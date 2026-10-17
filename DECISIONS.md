@@ -119,6 +119,13 @@ model (`plan/`), so the views never branch on the engine:
   from the lab's capability matrix. Explain Analyze falls back to the estimate, with a note, where
   the server can't measure (MySQL before 8.0.18, SQLite) and for statements that would change
   data. Running an UPDATE to time it is never worth the surprise.
+- MySQL 8.4 and later explain through JSON format version 2, not TREE text, for both modes.
+  Version 2 lists the same steps as TREE (a test checks this on every captured pair) and keeps
+  the table, schema, used columns, index, lookup and filter conditions and join algorithm as
+  separate fields, at full precision where TREE rounds to three digits. The cost is two extra
+  statements per Explain: one saves the session's `explain_json_format_version` and sets it to 2,
+  the other puts it back, on the same connection. MySQL 8.0.18 to 8.3 keep TREE, and older
+  servers use JSON version 1, which has estimates only.
 - Parsers recognize their format from the result's shape, not from which button ran it, so a
   hand-typed `EXPLAIN ANALYZE` gets the plan view too. Formats without a parser fall back to the
   server's raw text.

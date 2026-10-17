@@ -4,9 +4,10 @@
 //! The model keeps what the engines report in common. A node has an operation, the object it
 //! reads, a condition, the planner's estimate and the measured actuals, plus every raw attribute
 //! for display. MySQL TREE text, MySQL and MariaDB JSON, PostgreSQL JSON and SQLite's
-//! `EXPLAIN QUERY PLAN` rows all fit it; only MySQL TREE has a parser so far.
+//! `EXPLAIN QUERY PLAN` rows all fit it; MySQL TREE and PostgreSQL JSON have parsers so far.
 
 mod mysql_tree;
+mod postgres_json;
 mod request;
 
 pub use request::{ExplainMode, ExplainStatements, Unsupported, request};
@@ -108,6 +109,9 @@ pub struct Actual {
 pub struct PlanNode {
     /// What the step does: `Nested loop inner join`, `Seq Scan`, `SCAN`…
     pub operation: String,
+    /// How the step feeds its parent when it is not one of its inputs, such as PostgreSQL's
+    /// `SubPlan 1` or `CTE chain`: a subquery the parent runs for an expression.
+    pub role: Option<String>,
     /// The table, CTE or temporary result it reads.
     pub object: Option<String>,
     /// The index it uses.
@@ -130,6 +134,7 @@ impl PlanNode {
     pub fn new(operation: impl Into<String>) -> Self {
         Self {
             operation: operation.into(),
+            role: None,
             object: None,
             index: None,
             condition: None,
@@ -259,7 +264,7 @@ pub struct ParseError {
 type Parser = fn(&ServerInfo, &ResultSet) -> Option<Result<Plan, ParseError>>;
 
 /// Every format reader. Each recognizes its own result shape and returns `None` for others.
-const PARSERS: &[Parser] = &[mysql_tree::parse];
+const PARSERS: &[Parser] = &[mysql_tree::parse, postgres_json::parse];
 
 /// Reads a statement's result as a query plan. `None` when the result isn't a plan in a format
 /// with a parser; the caller then shows it as rows or as [`raw_text`].

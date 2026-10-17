@@ -94,7 +94,7 @@ fn node(object: &Object) -> Result<PlanNode, String> {
         let time = number("Actual Total Time")
             .filter(|_| loops > 0)
             .map(|last_row_ms| ActualTime { first_row_ms: number("Actual Startup Time"), last_row_ms });
-        node.actual = Some(Actual { rows, loops, time });
+        node.actual = Some(Actual { rows: Some(rows), loops, time });
     }
     for (key, value) in object.iter().filter(|(k, _)| *k != "Plans") {
         push_attributes(&mut node.attributes, key.clone(), value);
@@ -275,7 +275,7 @@ mod tests {
         assert_eq!(
             n.actual,
             Some(Actual {
-                rows: 639.0,
+                rows: Some(639.0),
                 loops: 3,
                 time: Some(ActualTime { first_row_ms: Some(0.001), last_row_ms: 0.037 })
             })
@@ -289,9 +289,9 @@ mod tests {
         assert!(!attrs.iter().any(|(k, _)| *k == "Plans"));
 
         let untimed = one(r#"{"Node Type": "Seq Scan", "Plan Rows": 5, "Actual Rows": 5, "Actual Loops": 1}"#);
-        assert_eq!(untimed.actual, Some(Actual { rows: 5.0, loops: 1, time: None }));
+        assert_eq!(untimed.actual, Some(Actual { rows: Some(5.0), loops: 1, time: None }));
         let fractional = one(r#"{"Node Type": "Index Scan", "Actual Rows": 0.50, "Actual Loops": 2}"#);
-        assert_eq!(fractional.actual.unwrap().rows, 0.5);
+        assert_eq!(fractional.actual.unwrap().rows, Some(0.5));
     }
 
     /// Captured from PostgreSQL 17, keys trimmed: an InitPlan that never ran and a SubPlan.
@@ -319,7 +319,7 @@ mod tests {
         let plan = parse_text(SUBPLANS).unwrap();
         let (id, never) = plan.nodes().nth(1).unwrap();
         assert_eq!(never.operation, "Limit");
-        assert_eq!(never.actual, Some(Actual { rows: 0.0, loops: 0, time: None }));
+        assert_eq!(never.actual, Some(Actual { rows: Some(0.0), loops: 0, time: None }));
         assert_eq!(plan.inclusive_ms(id), None);
         assert_eq!(plan.node(plan.children(id)[0]).actual.unwrap().time, None);
         assert!((plan.self_ms(NodeId::ROOT).unwrap() - (0.013 - 0.003)).abs() < 1e-9);

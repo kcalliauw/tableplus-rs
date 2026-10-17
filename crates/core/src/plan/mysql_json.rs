@@ -340,7 +340,7 @@ mod v2 {
                 .map(|total| Cost { startup: number(step, "estimated_first_row_cost"), total }),
         });
         node.actual = step.get("actual_loops").and_then(Value::as_u64).map(|loops| Actual {
-            rows: number(step, "actual_rows").unwrap_or(0.0),
+            rows: number(step, "actual_rows"),
             loops,
             time: number(step, "actual_last_row_ms")
                 .map(|last_row_ms| ActualTime { first_row_ms: number(step, "actual_first_row_ms"), last_row_ms }),
@@ -481,7 +481,7 @@ mod tests {
         assert_eq!(
             root.actual,
             Some(Actual {
-                rows: 12.0,
+                rows: Some(12.0),
                 loops: 1,
                 time: Some(ActualTime { first_row_ms: Some(0.5), last_row_ms: 1.25 })
             })
@@ -492,7 +492,7 @@ mod tests {
             (lookup.object.as_deref(), lookup.index.as_deref(), lookup.condition.as_deref()),
             (Some("c"), Some("PRIMARY"), Some("id=o.customer_id"))
         );
-        assert_eq!(lookup.actual, Some(Actual { rows: 0.0, loops: 0, time: None }));
+        assert_eq!(lookup.actual, Some(Actual { rows: None, loops: 0, time: None }));
         assert_eq!(plan.node(NodeId(4)).condition.as_deref(), Some("subquery in projection; dependent"));
         assert!(plan.node(NodeId(1)).attributes.iter().any(|a| a.key == "table_name" && a.value == "orders"));
         assert!(!root.attributes.iter().any(|a| a.key == "inputs" || a.key == "query"));

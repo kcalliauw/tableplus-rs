@@ -6,6 +6,7 @@
 //! for display. MySQL TREE text, MySQL and MariaDB JSON, PostgreSQL JSON and SQLite's
 //! `EXPLAIN QUERY PLAN` rows all fit it.
 
+mod mariadb_json;
 mod mysql_json;
 mod mysql_tree;
 mod postgres_json;
@@ -102,8 +103,9 @@ pub struct ActualTime {
 /// What happened when the statement ran.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Actual {
-    /// Rows per loop, averaged over the loops, so it can be fractional.
-    pub rows: f64,
+    /// Rows per loop, averaged over the loops, so it can be fractional. `None` for a step the
+    /// engine times without counting its rows, such as a MariaDB query block.
+    pub rows: Option<f64>,
     /// How many times the node ran; zero when it never executed.
     pub loops: u64,
     /// `None` when the engine counted rows without timing them.
@@ -166,7 +168,7 @@ impl PlanNode {
         if estimated == 0.0 {
             return None;
         }
-        let actual = self.actual.filter(|a| a.loops > 0)?.rows;
+        let actual = self.actual.filter(|a| a.loops > 0)?.rows?;
         Some(actual.max(1.0) / estimated.max(1.0))
     }
 
@@ -274,8 +276,14 @@ pub struct ParseError {
 type Parser = fn(&ServerInfo, &ResultSet) -> Option<Result<Plan, ParseError>>;
 
 /// Every format reader. Each recognizes its own result shape and returns `None` for others.
-const PARSERS: &[Parser] =
-    &[mysql_tree::parse, mysql_json::parse_v1, mysql_json::parse_v2, postgres_json::parse, sqlite_eqp::parse];
+const PARSERS: &[Parser] = &[
+    mysql_tree::parse,
+    mysql_json::parse_v1,
+    mysql_json::parse_v2,
+    mariadb_json::parse,
+    postgres_json::parse,
+    sqlite_eqp::parse,
+];
 
 /// Reads a statement's result as a query plan. `None` when the result isn't a plan in a format
 /// with a parser; the caller then shows it as rows or as [`raw_text`].
@@ -341,8 +349,11 @@ mod tests {
 
     fn timed(op: &str, first: f64, last: f64, rows: f64, loops: u64) -> PlanNode {
         let mut n = PlanNode::new(op);
-        n.actual =
-            Some(Actual { rows, loops, time: Some(ActualTime { first_row_ms: Some(first), last_row_ms: last }) });
+        n.actual = Some(Actual {
+            rows: Some(rows),
+            loops,
+            time: Some(ActualTime { first_row_ms: Some(first), last_row_ms: last }),
+        });
         n
     }
 
@@ -426,6 +437,9 @@ mod tests {
         assert!(!with(0.333, 0.01, 1083).is_misestimated());
         assert_eq!(with(5.0, 0.0, 0).row_estimate_ratio(), None);
         assert_eq!(timed("scan", 0.0, 1.0, 5.0, 1).row_estimate_ratio(), None);
+        let mut uncounted = with(10.0, 0.0, 1);
+        uncounted.actual.as_mut().unwrap().rows = None;
+        assert_eq!(uncounted.row_estimate_ratio(), None);
     }
 
     #[test]

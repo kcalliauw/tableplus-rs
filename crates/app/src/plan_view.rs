@@ -823,7 +823,7 @@ fn bar_legend(painter: &Painter, left_center: Pos2, analyzed: bool, p: &Palette)
     };
     if analyzed {
         item(p.plan_bar_self, "self");
-        item(p.plan_bar, "with children");
+        item(p.plan_bar, "total");
     } else {
         item(p.plan_cost, "relative cost");
     }

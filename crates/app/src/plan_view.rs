@@ -15,6 +15,7 @@ use tableplus_core::model::ResultSet;
 use tableplus_core::plan::{self, NodeId, Plan, PlanFormat, PlanNode};
 
 use crate::icons::Icon;
+use crate::plan_graph::{self, GraphView};
 use crate::theme::{self, Palette, palette};
 use crate::widgets::{self, fmt_count, fmt_factor, fmt_ms, fmt_rows};
 
@@ -53,6 +54,14 @@ impl PlanContent {
     }
 }
 
+/// Which picture of the plan the pane shows.
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Tree,
+    Graph,
+    Raw,
+}
+
 /// Derived numbers per node, computed once when the plan arrives.
 struct Metrics {
     inclusive_ms: Option<f64>,
@@ -64,7 +73,8 @@ pub struct PlanView {
     content: PlanContent,
     /// Why the plan differs from what was asked for, such as Analyze falling back to estimates.
     note: Option<String>,
-    show_raw: bool,
+    mode: Mode,
+    graph: GraphView,
     collapsed: Vec<bool>,
     /// Rows on screen, top to bottom: the nodes whose ancestors are all expanded.
     visible: Vec<NodeId>,
@@ -84,7 +94,8 @@ impl PlanView {
         let mut view = Self {
             content,
             note,
-            show_raw: false,
+            mode: Mode::Tree,
+            graph: GraphView::default(),
             collapsed: Vec::new(),
             visible: Vec::new(),
             metrics: Vec::new(),
@@ -196,6 +207,17 @@ impl PlanView {
         None
     }
 
+    /// Unfolds the selected step's ancestors and scrolls to it, after the graph moved the selection.
+    fn reveal_selected(&mut self) {
+        let Some((plan, sel)) = self.plan().zip(self.selected) else { return };
+        let ancestors: Vec<NodeId> = std::iter::successors(plan.parent(sel), |n| plan.parent(*n)).collect();
+        for a in ancestors {
+            self.collapsed[a.index()] = false;
+        }
+        self.rebuild_visible();
+        self.scroll_to_selected = true;
+    }
+
     /// Selects the `index`th visible row and opens its details.
     pub fn select_row(&mut self, index: usize) {
         if let Some(id) = self.visible.get(index.min(self.visible.len().saturating_sub(1))) {
@@ -213,7 +235,7 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut PlanView) {
     if let Some(note) = &view.note {
         banner(ui, id.with("note"), note, p.warning, p);
     }
-    if view.show_raw || view.plan().is_none() {
+    if view.mode == Mode::Raw || view.plan().is_none() {
         raw_view(ui, id, view.raw_text());
         return;
     }
@@ -229,7 +251,12 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut PlanView) {
             .show(ui, |ui| detail(ui, view, sel, &mut open));
         view.detail_open = open;
     }
-    egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| tree(ui, id, view));
+    egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| match (view.mode, &view.content) {
+        (Mode::Graph, PlanContent::Tree(plan)) => {
+            plan_graph::show(ui, id.with("graph"), plan, &mut view.graph, &mut view.selected, &mut view.detail_open)
+        }
+        _ => tree(ui, id, view),
+    });
 }
 
 fn toolbar(ui: &mut Ui, id: Id, view: &mut PlanView, p: &Palette) {
@@ -242,8 +269,11 @@ fn toolbar(ui: &mut Ui, id: Id, view: &mut PlanView, p: &Palette) {
             if let Some(plan) = view.plan() {
                 let kind = if plan.analyzed() { "Analyzed" } else { "Estimated" };
                 let label = format!("{kind} · {}", plan.format.label());
-                widgets::segmented(ui, &mut view.show_raw, &[(false, "Tree"), (true, "Raw")]);
-                if !view.show_raw {
+                let modes = [(Mode::Tree, "Tree"), (Mode::Graph, "Graph"), (Mode::Raw, "Raw")];
+                if widgets::segmented(ui, &mut view.mode, &modes) && view.mode == Mode::Tree {
+                    view.reveal_selected();
+                }
+                if view.mode == Mode::Tree {
                     ui.add_space(6.0);
                     if text_button(ui, "Expand all").clicked() {
                         view.set_all_collapsed(false);
@@ -965,6 +995,6 @@ fn detail(ui: &mut Ui, view: &PlanView, id: NodeId, open: &mut bool) {
 }
 
 /// A step as `key: value` lines, for the clipboard.
-fn node_text(node: &PlanNode) -> String {
+pub(crate) fn node_text(node: &PlanNode) -> String {
     node.attributes.iter().map(|a| format!("{}: {}", a.key, a.value)).collect::<Vec<_>>().join("\n")
 }

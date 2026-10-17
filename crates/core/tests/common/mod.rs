@@ -6,6 +6,8 @@
 
 #![allow(dead_code)]
 
+pub mod golden;
+
 use std::time::Instant;
 
 use tableplus_core::alter::{ColumnDef, StructureChange, alter_statements, create_table_sql};

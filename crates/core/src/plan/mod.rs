@@ -6,6 +6,7 @@
 //! for display. MySQL TREE text, MySQL and MariaDB JSON, PostgreSQL JSON and SQLite's
 //! `EXPLAIN QUERY PLAN` rows all fit it; only MySQL TREE has a parser so far.
 
+mod mysql_tree;
 mod request;
 
 pub use request::{ExplainMode, ExplainStatements, Unsupported, request};
@@ -254,7 +255,7 @@ pub struct ParseError {
 type Parser = fn(&ServerInfo, &ResultSet) -> Option<Result<Plan, ParseError>>;
 
 /// Every format reader. Each recognizes its own result shape and returns `None` for others.
-const PARSERS: &[Parser] = &[];
+const PARSERS: &[Parser] = &[mysql_tree::parse];
 
 /// Reads a statement's result as a query plan. `None` when the result isn't a plan in a format
 /// with a parser; the caller then shows it as rows or as [`raw_text`].

@@ -14,7 +14,7 @@ mod postgres_json;
 mod request;
 mod sqlite_eqp;
 
-pub use access::Access;
+pub use access::{Access, Extra};
 pub use request::{ExplainMode, ExplainStatements, Unsupported, request};
 
 use crate::model::ResultSet;

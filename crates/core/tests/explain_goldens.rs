@@ -5,7 +5,7 @@ mod common;
 
 use common::golden::{self, Golden};
 use tableplus_core::Flavor;
-use tableplus_core::plan::{self, NodeId, Plan, PlanFormat};
+use tableplus_core::plan::{self, Access, NodeId, Plan, PlanFormat};
 
 /// The plan's nodes in tree order, walked through the public parent-to-children links.
 fn tree_order(plan: &Plan) -> Vec<NodeId> {
@@ -150,6 +150,84 @@ fn postgres_12_costs_already_include_the_steps_below() {
     for (id, _) in plan.nodes() {
         let cost = plan.estimated_cost(id).expect("every PostgreSQL step is costed").total;
         assert!(spans[id.index()] <= cost * plan::SPAN_SLACK, "{id:?}: {} over {cost}", spans[id.index()]);
+    }
+}
+
+/// `(object, access)` for every step that reads rows, in plan order.
+fn reads(plan: &Plan) -> Vec<(String, Access)> {
+    plan.nodes()
+        .filter_map(|(id, n)| Some((n.object.clone().unwrap_or_else(|| n.operation.clone()), plan.access(id)?)))
+        .collect()
+}
+
+#[test]
+fn full_scans_are_of_real_tables_and_internal_results_have_their_own_class() {
+    let Some(goldens) = golden::load() else { return };
+    let (mut plans, mut internal) = (0, 0);
+    for g in goldens.iter().filter(|g| g.outcome == "ok") {
+        let Some(Ok(plan)) = plan::parse(&g.server, g.result.as_ref().unwrap()) else { continue };
+        plans += 1;
+        for (id, node) in plan.nodes() {
+            let object = node.object.as_deref().unwrap_or("");
+            match plan.access(id) {
+                Some(Access::FullScan) => {
+                    assert!(!object.starts_with('<') && !object.starts_with('('), "{}: {object} is built", g.name);
+                    // JSON version 1 and MariaDB hang subqueries of a table's condition below it.
+                    if matches!(plan.format, PlanFormat::MySqlTree | PlanFormat::MySqlJsonV2) {
+                        assert!(plan.children(id).is_empty(), "{}: a full scan of {object} reads an input", g.name);
+                    }
+                }
+                Some(Access::InternalResult) => internal += 1,
+                _ => {}
+            }
+        }
+    }
+    assert!(plans > 100 && internal > 100, "{plans} plans, {internal} internal results");
+}
+
+#[test]
+fn access_classes_of_the_portable_query_on_each_engine() {
+    use Access::*;
+    let classes = |target: &str, variant: &str| {
+        let g = golden::one(target, "portable", variant)?;
+        Some(reads(&plan::parse(&g.server, g.result.as_ref().unwrap())?.ok()?))
+    };
+    let has = |reads: &[(String, Access)], object: &str, access: Access| {
+        assert!(reads.iter().any(|(o, a)| o == object && *a == access), "{object} as {access:?} in {reads:?}");
+    };
+    if let Some(r) = classes("mysql-8.4", "analyze") {
+        has(&r, "<union temporary>", InternalResult);
+        has(&r, "<subquery4>", InternalResult);
+        has(&r, "c", FullScan);
+        has(&r, "e", UniqueLookup);
+        has(&r, "od", IndexScan);
+    }
+    if let Some(r) = classes("mysql-5.7", "json") {
+        has(&r, "<union1,5>", InternalResult);
+        has(&r, "t", InternalResult);
+        has(&r, "cat", FullScan);
+        has(&r, "s", FullScan);
+        has(&r, "o2", Lookup);
+    }
+    if let Some(r) = classes("mariadb-11.8", "analyze-json") {
+        has(&r, "<union1,5>", InternalResult);
+        has(&r, "<derived3>", Lookup);
+        has(&r, "cat2", FullScan);
+        has(&r, "o", UniqueLookup);
+    }
+    if let Some(r) = classes("postgres-17", "analyze-buffers-json") {
+        assert!(r.iter().any(|(o, a)| o.starts_with("*SELECT* 1") && *a == InternalResult), "{r:?}");
+        has(&r, "orders o", FullScan);
+        assert!(r.iter().any(|(_, a)| *a == Lookup), "{r:?}");
+    }
+    if let Some(g) = golden::one("sqlite-bundled", "modern", "query-plan") {
+        let r = reads(&plan::parse(&g.server, g.result.as_ref().unwrap()).unwrap().unwrap());
+        has(&r, "t", InternalResult);
+        has(&r, "(subquery-7)", InternalResult);
+        has(&r, "chain", InternalResult);
+        has(&r, "employees", FullScan);
+        has(&r, "o", UniqueLookup);
+        has(&r, "e", Lookup);
     }
 }
 

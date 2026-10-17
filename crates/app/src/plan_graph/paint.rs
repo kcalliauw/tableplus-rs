@@ -26,6 +26,7 @@ fn legend_label(access: Access) -> &'static str {
         Access::Range => "Range",
         Access::Lookup | Access::UniqueLookup => "Key lookup",
         Access::Constant => "Constant",
+        Access::InternalResult => "Internal result",
     }
 }
 
@@ -236,7 +237,21 @@ pub(super) fn paint_box(f: &Frame, r: Rect, node: &PlanNode, step: &Step, look: 
     // A long name without an object or condition, such as `Aggregate using temporary table`,
     // takes the second line too.
     let has_detail = node.object.is_some() || node.index.is_some() || node.condition.is_some();
-    let mut title = line(&node.operation, theme::bold_font(12.5), text, w, scale);
+    // Badges for side work sit top right, and the title gives up their width.
+    let mut badge_right = r.right() - 10.0 * z;
+    for extra in step.extras.iter().rev() {
+        let job = line(extra.label(), theme::ui_font(10.0), muted, 80.0, scale);
+        let size = f.painter.layout_job(job.clone()).size() * scale.mesh;
+        let pill = Rect::from_min_max(
+            pos2(badge_right - size.x - 10.0 * z, r.top() + 8.0 * z),
+            pos2(badge_right, r.top() + 23.0 * z),
+        );
+        painter.rect_stroke(pill, radius(4.0 * z), Stroke::new(1.0, fade(f.s.card_border)), StrokeKind::Inside);
+        paint_text(painter, pill.center(), Align2::CENTER_CENTER, job, scale);
+        badge_right = pill.left() - 4.0 * z;
+    }
+    let w_title = (badge_right - 6.0 * z - left) / z;
+    let mut title = line(&node.operation, theme::bold_font(12.5), text, w_title, scale);
     title.wrap.max_rows = if has_detail { 1 } else { 2 };
     title.wrap.break_anywhere = has_detail;
     paint_text(painter, pos2(left, r.top() + 9.0 * z), Align2::LEFT_TOP, title, scale);
@@ -543,6 +558,9 @@ pub(super) fn tooltip(ui: &mut Ui, node: &PlanNode, step: &Step, analyzed: bool,
             );
             ui.label(RichText::new(access.label()).size(12.0).color(p.text_muted));
         });
+    }
+    for extra in &step.extras {
+        ui.label(RichText::new(extra.description()).size(12.0).color(p.text_muted));
     }
     if let Some(condition) = &node.condition {
         ui.add(egui::Label::new(RichText::new(condition).font(theme::mono_font(11.5)).color(p.text)).wrap());

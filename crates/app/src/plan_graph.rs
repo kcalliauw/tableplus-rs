@@ -13,7 +13,7 @@ use eframe::egui::{
     self, Align2, Color32, CornerRadius, CursorIcon, EventFilter, Id, Key, Pos2, Rect, Sense, Stroke, StrokeKind, Ui,
     Vec2, pos2, vec2,
 };
-use tableplus_core::plan::{Access, NodeId, Plan, SPAN_SLACK};
+use tableplus_core::plan::{Access, Extra, NodeId, Plan, SPAN_SLACK};
 
 use crate::icons::{self, Icon};
 use crate::theme::{self, palette};
@@ -58,6 +58,8 @@ struct Step {
     bar: Option<(f32, f32)>,
     /// `Estimated 1,616 rows, cost 757`, for the tooltip.
     estimate: Option<String>,
+    /// `temp table`, `filesort`: side work the colour doesn't show.
+    extras: Vec<Extra>,
     misestimate: Option<f64>,
     descendants: usize,
 }
@@ -358,7 +360,8 @@ fn prepare(plan: &Plan, collapsed: &[bool]) -> Prepared {
                 .collect();
             Step {
                 estimate: (!estimate_parts.is_empty()).then(|| format!("Estimated {}", estimate_parts.join(", "))),
-                access: node.access(),
+                access: plan.access(id),
+                extras: plan.extras(id),
                 join: node.is_join(),
                 flow: flow(plan, id, analyzed),
                 rows,
@@ -377,7 +380,8 @@ fn prepare(plan: &Plan, collapsed: &[bool]) -> Prepared {
         (None, Some(ms)) => fmt_ms(ms),
         (None, None) => String::new(),
     };
-    let order = [Access::FullScan, Access::IndexScan, Access::Range, Access::Lookup, Access::Constant];
+    let order =
+        [Access::FullScan, Access::IndexScan, Access::Range, Access::Lookup, Access::Constant, Access::InternalResult];
     let legend = order.into_iter().filter(|a| steps.iter().any(|s| s.access.map(legend_class) == Some(*a))).collect();
     Prepared {
         ids: plan.nodes().map(|(id, _)| id).collect(),
@@ -412,7 +416,9 @@ fn flow(plan: &Plan, id: NodeId, analyzed: bool) -> Option<f64> {
 }
 
 /// Workbench's colours: red for a full table scan, red-orange for a full index scan, orange for a
-/// range, green for key lookups and blue for a constant row.
+/// range, green for key lookups and blue for a constant row. Reading back a temporary result
+/// gets a muted violet instead of Workbench's red: no index can make that read cheaper, so red
+/// would point at a step the user can't change.
 pub(crate) fn access_color(access: Access, dark: bool) -> Color32 {
     let (light, night) = match access {
         Access::FullScan => (0xE5484D, 0xFF6369),
@@ -420,6 +426,7 @@ pub(crate) fn access_color(access: Access, dark: bool) -> Color32 {
         Access::Range => (0xE59A00, 0xFFBA3B),
         Access::Lookup | Access::UniqueLookup => (0x2E9E5B, 0x3DD68C),
         Access::Constant => (0x1B9BD8, 0x55C3F7),
+        Access::InternalResult => (0x8E86B0, 0xA29BC9),
     };
     let rgb: u32 = if dark { night } else { light };
     Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)

@@ -591,6 +591,17 @@ fn tooltip(ui: &mut Ui, plan: &Plan, id: NodeId, bar: &Bar, total_ms: f64) {
     if !object.is_empty() {
         ui.label(RichText::new(object.join("  ·  ")).size(12.0).color(p.text_muted));
     }
+    if let Some(access) = plan.access(id) {
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(vec2(8.0, 12.0), Sense::hover());
+            let color = crate::plan_graph::access_color(access, ui.visuals().dark_mode);
+            ui.painter().rect_filled(Rect::from_center_size(r.center(), vec2(8.0, 8.0)), CornerRadius::same(2), color);
+            ui.label(RichText::new(access.label()).size(12.0).color(p.text_muted));
+        });
+    }
+    for extra in plan.extras(id) {
+        ui.label(RichText::new(extra.description()).size(12.0).color(p.text_muted));
+    }
     if let Some(condition) = &node.condition {
         ui.add(egui::Label::new(RichText::new(condition).font(theme::mono_font(11.5)).color(p.text_muted)).wrap());
     }

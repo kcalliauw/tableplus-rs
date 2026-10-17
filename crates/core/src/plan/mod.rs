@@ -4,8 +4,9 @@
 //! The model keeps what the engines report in common. A node has an operation, the object it
 //! reads, a condition, the planner's estimate and the measured actuals, plus every raw attribute
 //! for display. MySQL TREE text, MySQL and MariaDB JSON, PostgreSQL JSON and SQLite's
-//! `EXPLAIN QUERY PLAN` rows all fit it; only MySQL TREE has a parser so far.
+//! `EXPLAIN QUERY PLAN` rows all fit it; MySQL TREE and MariaDB JSON have parsers so far.
 
+mod mariadb_json;
 mod mysql_tree;
 mod request;
 
@@ -260,7 +261,7 @@ pub struct ParseError {
 type Parser = fn(&ServerInfo, &ResultSet) -> Option<Result<Plan, ParseError>>;
 
 /// Every format reader. Each recognizes its own result shape and returns `None` for others.
-const PARSERS: &[Parser] = &[mysql_tree::parse];
+const PARSERS: &[Parser] = &[mysql_tree::parse, mariadb_json::parse];
 
 /// Reads a statement's result as a query plan. `None` when the result isn't a plan in a format
 /// with a parser; the caller then shows it as rows or as [`raw_text`].

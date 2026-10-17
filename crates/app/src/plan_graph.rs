@@ -21,7 +21,7 @@ use crate::theme::{self, Palette, palette};
 use crate::widgets::{fmt_count, fmt_factor, fmt_ms, fmt_rows};
 use layout::{BOX_W, Layout, ROW_GAP};
 
-const MIN_ZOOM: f32 = 0.08;
+const MIN_ZOOM: f32 = 0.02;
 const MAX_ZOOM: f32 = 2.5;
 /// Below this zoom the boxes drop their text and the graph reads as a map of colours.
 const TEXT_ZOOM: f32 = 0.36;
@@ -384,18 +384,19 @@ fn rows_text(rows: f64) -> String {
 }
 
 /// Rows a step passes up over all its loops, or its estimate per loop. A step without numbers,
-/// such as MySQL's `Hash`, passes on what its children produce.
+/// such as MySQL's `Hash`, passes on what its children produce. MySQL estimates zero rows for
+/// steps it doesn't estimate, such as temporary tables, so those carry no number.
 fn flow(plan: &Plan, id: NodeId, analyzed: bool) -> Option<f64> {
     let node = plan.node(id);
-    let own = if analyzed {
-        node.actual.map(|a| a.rows * a.loops as f64)
-    } else {
-        node.estimate.map(|e| e.rows).filter(|r| *r > 0.0)
-    };
-    own.or_else(|| {
-        let below: Vec<f64> = plan.children(id).iter().filter_map(|c| flow(plan, *c, analyzed)).collect();
-        (!below.is_empty()).then(|| below.iter().sum())
-    })
+    let own = if analyzed { node.actual.map(|a| a.rows * a.loops as f64) } else { node.estimate.map(|e| e.rows) };
+    match own {
+        Some(rows) if analyzed || rows > 0.0 => Some(rows),
+        Some(_) => None,
+        None => {
+            let below: Vec<f64> = plan.children(id).iter().filter_map(|c| flow(plan, *c, analyzed)).collect();
+            (!below.is_empty()).then(|| below.iter().sum())
+        }
+    }
 }
 
 /// Unique and non-unique lookups share a colour, so the legend shows them as one.
@@ -751,12 +752,16 @@ pub fn show(
         };
         let step = &prepared.steps[i];
         let screen = f.screen(rect);
+        let folded = view.collapsed[i] && alpha >= 1.0;
+        if folded && !step.join {
+            fold_stack(&f, screen);
+        }
         if step.join {
             paint_join(&f, screen, plan.node(node_id), step, look);
         } else {
             paint_box(&f, screen, plan.node(node_id), step, look);
         }
-        if view.collapsed[i] && alpha >= 1.0 {
+        if folded {
             fold_pill(&f, screen, step.descendants);
         }
     }
@@ -845,13 +850,13 @@ fn paint_box(f: &Frame, r: Rect, node: &PlanNode, step: &Step, look: Look) {
     let left = r.left() + 14.0 * z;
     let w = (r.right() - 10.0 * z - left) / z;
     let (text, muted, faint) = (fade(p.text), fade(p.text_muted), fade(p.text_faint));
-    paint_text(
-        painter,
-        pos2(left, r.top() + 9.0 * z),
-        Align2::LEFT_TOP,
-        line(&node.operation, theme::bold_font(12.5), text, w, scale),
-        scale,
-    );
+    // A long name without an object or condition, such as `Aggregate using temporary table`,
+    // takes the second line too.
+    let has_detail = node.object.is_some() || node.index.is_some() || node.condition.is_some();
+    let mut title = line(&node.operation, theme::bold_font(12.5), text, w, scale);
+    title.wrap.max_rows = if has_detail { 1 } else { 2 };
+    title.wrap.break_anywhere = has_detail;
+    paint_text(painter, pos2(left, r.top() + 9.0 * z), Align2::LEFT_TOP, title, scale);
 
     let mut detail = LayoutJob::default();
     if let Some(object) = &node.object {
@@ -936,12 +941,19 @@ fn paint_join(f: &Frame, r: Rect, node: &PlanNode, step: &Step, look: Look) {
     let label = if look.selected { fade(accent) } else { fade(p.text) };
     let job = line(&node.operation, theme::bold_font(11.5), label, w, scale);
     paint_text(painter, pos2(c.x, r.top() + 46.0 * z), Align2::CENTER_TOP, job, scale);
-    let numbers: Vec<&str> =
-        [Some(step.rows.as_str()).filter(|r| !r.is_empty()), step.value.as_deref()].into_iter().flatten().collect();
+    let mut numbers = LayoutJob::default();
+    let muted = scale.format(theme::ui_font(11.0), fade(p.text_muted));
+    if !step.rows.is_empty() {
+        let rows = if step.misestimate.is_some() { fade(p.warning) } else { fade(p.text_muted) };
+        numbers.append(&step.rows, 0.0, scale.format(theme::ui_font(11.0), rows));
+    }
+    if let Some(value) = &step.value {
+        let sep = if numbers.is_empty() { "" } else { " · " };
+        numbers.append(&format!("{sep}{value}"), 0.0, muted);
+    }
     if !numbers.is_empty() {
-        let color = if step.misestimate.is_some() { fade(p.warning) } else { fade(p.text_muted) };
-        let job = line(&numbers.join(" · "), theme::ui_font(11.0), color, w, scale);
-        paint_text(painter, pos2(c.x, r.top() + 61.0 * z), Align2::CENTER_TOP, job, scale);
+        elide(&mut numbers, w, scale);
+        paint_text(painter, pos2(c.x, r.top() + 61.0 * z), Align2::CENTER_TOP, numbers, scale);
     }
 }
 
@@ -972,6 +984,15 @@ fn misestimate_badge(f: &Frame, left_center: Pos2, ratio: f64, scale: TextScale,
     paint_text(f.painter, pos2(rect.left() + 11.5 * z, cy), Align2::LEFT_CENTER, job, scale);
 }
 
+/// The edges of two cards behind a folded box, standing for the steps it hides.
+fn fold_stack(f: &Frame, card: Rect) {
+    let z = f.zoom();
+    for depth in [2.0, 1.0] {
+        let r = card.translate(vec2(0.0, 6.0 * z * depth)).shrink2(vec2(8.0 * z * depth, 0.0));
+        f.painter.rect(r, radius(8.0 * z), f.s.card, Stroke::new(1.0, f.s.card_border), StrokeKind::Inside);
+    }
+}
+
 /// The `+12` tab under a folded step; clicking it unfolds the step.
 fn fold_pill(f: &Frame, card: Rect, hidden: usize) {
     let rect = fold_pill_rect(card, f.zoom());
@@ -983,7 +1004,7 @@ fn fold_pill(f: &Frame, card: Rect, hidden: usize) {
 }
 
 fn fold_pill_rect(card: Rect, zoom: f32) -> Rect {
-    Rect::from_center_size(pos2(card.center().x, card.bottom() + 10.0 * zoom), vec2(42.0, 18.0) * zoom)
+    Rect::from_center_size(pos2(card.center().x, card.bottom() + 28.0 * zoom), vec2(46.0, 20.0) * zoom)
 }
 
 /// Edges widen with the logarithm of the rows they carry: 1 row is a hairline, 100,000 rows the
@@ -1159,11 +1180,13 @@ fn tooltip(ui: &mut Ui, node: &PlanNode, step: &Step, analyzed: bool, dark: bool
         }
     }
     if let Some(est) = node.estimate {
-        let mut text = format!("Estimated {}", rows_text(est.rows));
-        if let Some(cost) = est.cost {
-            text.push_str(&format!(", cost {}", fmt_rows(cost.total)));
+        // MySQL prints zero rows for steps it doesn't estimate.
+        let rows = (est.rows > 0.0).then(|| rows_text(est.rows));
+        let cost = est.cost.map(|c| format!("cost {}", fmt_rows(c.total)));
+        let parts: Vec<String> = rows.into_iter().chain(cost).collect();
+        if !parts.is_empty() {
+            facts.push(format!("Estimated {}", parts.join(", ")));
         }
-        facts.push(text);
     }
     if !facts.is_empty() {
         ui.add_space(2.0);
@@ -1328,5 +1351,117 @@ fn keyboard(
     }
     if copy && let Some(sel) = *selected {
         ui.ctx().copy_text(crate::plan_view::node_text(plan.node(sel)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tableplus_core::plan::{Actual, Estimate, PlanFormat};
+
+    fn ran(op: &str, rows: f64, loops: u64) -> PlanNode {
+        let mut n = PlanNode::new(op);
+        n.actual = Some(Actual { rows, loops, time: None });
+        n
+    }
+
+    fn estimated(op: &str, rows: f64) -> PlanNode {
+        let mut n = PlanNode::new(op);
+        n.estimate = Some(Estimate { rows, cost: None });
+        n
+    }
+
+    /// join ─┬─ scan ×1
+    ///       ├─ hash (no numbers) ── scan
+    ///       └─ lookup × 830 loops
+    fn analyzed() -> (Plan, [NodeId; 5]) {
+        let mut plan = Plan::new(PlanFormat::MySqlTree, ran("Inner hash join", 287.0, 1), "");
+        let scan = plan.add_child(NodeId::ROOT, ran("Table scan", 91.0, 1));
+        let hash = plan.add_child(NodeId::ROOT, PlanNode::new("Hash"));
+        let inner = plan.add_child(hash, ran("Table scan", 830.0, 1));
+        let lookup = plan.add_child(NodeId::ROOT, ran("Single-row index lookup", 1.0, 830));
+        (plan, [NodeId::ROOT, scan, hash, inner, lookup])
+    }
+
+    #[test]
+    fn edges_carry_the_rows_of_every_loop() {
+        let (plan, [_, scan, hash, inner, lookup]) = analyzed();
+        assert_eq!(flow(&plan, scan, true), Some(91.0));
+        assert_eq!(flow(&plan, lookup, true), Some(830.0));
+        assert_eq!(flow(&plan, hash, true), flow(&plan, inner, true), "a step without numbers passes its input on");
+        let mut never = plan.clone();
+        never.add_child(NodeId::ROOT, ran("Index lookup", 0.0, 0));
+        assert_eq!(flow(&never, never.nodes().last().unwrap().0, true), Some(0.0));
+    }
+
+    #[test]
+    fn unestimated_steps_carry_no_row_count() {
+        let mut plan = Plan::new(PlanFormat::MySqlTree, estimated("Limit", 0.0), "");
+        let sort = plan.add_child(NodeId::ROOT, PlanNode::new("Sort"));
+        plan.add_child(sort, estimated("Table scan", 1616.0));
+        assert_eq!(flow(&plan, NodeId::ROOT, false), None, "MySQL's rows=0 means not estimated");
+        assert_eq!(flow(&plan, sort, false), Some(1616.0));
+    }
+
+    fn view(plan: &Plan) -> GraphView {
+        let mut view = GraphView::default();
+        view.collapsed = vec![false; plan.node_count()];
+        view.prepared = Some(prepare(plan, &view.collapsed));
+        view
+    }
+
+    fn canvas() -> Rect {
+        Rect::from_min_size(pos2(250.0, 310.0), vec2(1190.0, 590.0))
+    }
+
+    #[test]
+    fn fit_shows_every_step() {
+        let (plan, _) = analyzed();
+        let mut view = view(&plan);
+        view.camera = view.fit(canvas());
+        let layout = &view.prepared.as_ref().unwrap().layout;
+        for (id, _) in plan.nodes() {
+            let on_screen = view.camera.rect(canvas(), layout.rect(id).unwrap());
+            assert!(canvas().contains_rect(on_screen), "{id:?} is on screen");
+        }
+    }
+
+    #[test]
+    fn revealing_a_step_brings_it_on_screen() {
+        let (plan, [.., lookup]) = analyzed();
+        let mut view = view(&plan);
+        let rect = view.prepared.as_ref().unwrap().layout.rect(lookup).unwrap();
+        view.camera = Camera { center: pos2(-3000.0, -3000.0), zoom: 1.0 };
+        view.reveal_rect(canvas(), rect, 0.0);
+        let (camera, done) = view.flight.expect("flies to the step").at(10.0);
+        assert!(done);
+        assert!(canvas().contains_rect(camera.rect(canvas(), rect)));
+    }
+
+    #[test]
+    fn folding_keeps_the_step_in_place_and_selects_it_when_the_selection_hides() {
+        let (plan, [_, _, hash, inner, _]) = analyzed();
+        let mut view = view(&plan);
+        let before = view.camera.rect(canvas(), view.prepared.as_ref().unwrap().layout.rect(hash).unwrap());
+        let mut selected = Some(inner);
+        view.toggle(&plan, hash, 0.0, &mut selected);
+        let layout = &view.prepared.as_ref().unwrap().layout;
+        assert_eq!(layout.rect(inner), None, "the folded step's inputs are hidden");
+        assert_eq!(selected, Some(hash));
+        let after = view.camera.rect(canvas(), layout.rect(hash).unwrap());
+        assert!((after.center() - before.center()).length() < 0.01, "the folded step stays where it was");
+    }
+
+    #[test]
+    fn a_moving_zoom_lays_text_out_at_few_sizes() {
+        let zooms = (0..200).map(|i| TEXT_ZOOM + i as f32 * (MAX_ZOOM - TEXT_ZOOM) / 199.0);
+        let mut sizes: Vec<f32> = zooms.clone().map(|z| TextScale::new(z, true).layout).collect();
+        sizes.dedup();
+        assert!(sizes.len() <= 8, "{} sizes while zooming", sizes.len());
+        assert!(zooms.clone().all(|z| TextScale::new(z, true).mesh <= 1.0), "glyphs only shrink, so text stays sharp");
+        assert!(
+            zooms.clone().all(|z| (TextScale::new(z, false).mesh - 1.0).abs() < 0.05),
+            "at rest text is laid out at its size"
+        );
     }
 }

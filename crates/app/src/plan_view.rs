@@ -717,7 +717,8 @@ fn next_move(view: &PlanView, key: Key, page: usize) -> Option<Move> {
 
 /// The whole step on one line, for the tooltip of an elided row.
 fn full_label(node: &PlanNode) -> String {
-    let parts = [Some(&node.operation), node.object.as_ref(), node.index.as_ref(), node.condition.as_ref()];
+    let parts =
+        [node.role.as_ref(), Some(&node.operation), node.object.as_ref(), node.index.as_ref(), node.condition.as_ref()];
     parts.into_iter().flatten().map(String::as_str).collect::<Vec<_>>().join("  ·  ")
 }
 
@@ -730,7 +731,10 @@ fn label(ui: &Ui, node: &PlanNode, max_w: f32, on_accent: bool, p: &Palette) -> 
     };
     let fmt = |font: FontId, color: Color32| egui::TextFormat { font_id: font, color, ..Default::default() };
     let mut job = LayoutJob::default();
-    job.append(&node.operation, 0.0, fmt(theme::ui_font(13.0), text));
+    if let Some(role) = &node.role {
+        job.append(role, 0.0, fmt(theme::ui_font(12.0), muted));
+    }
+    job.append(&node.operation, if node.role.is_some() { 6.0 } else { 0.0 }, fmt(theme::ui_font(13.0), text));
     if let Some(object) = &node.object {
         job.append(object, 6.0, fmt(theme::bold_font(13.0), text));
     }
@@ -885,6 +889,9 @@ fn detail(ui: &mut Ui, view: &PlanView, id: NodeId, open: &mut bool) {
                     }
                 },
             );
+            if let Some(role) = &node.role {
+                ui.label(RichText::new(role).font(theme::ui_font(12.5)).color(p.text_muted));
+            }
             if let Some(object) = &node.object {
                 let text = match &node.index {
                     Some(index) => format!("{object}  ·  {index}"),

@@ -8,6 +8,7 @@
 
 mod mysql_json;
 mod mysql_tree;
+mod postgres_json;
 mod request;
 mod sqlite_eqp;
 
@@ -114,6 +115,9 @@ pub struct Actual {
 pub struct PlanNode {
     /// What the step does: `Nested loop inner join`, `Seq Scan`, `SCAN`…
     pub operation: String,
+    /// How the step feeds its parent when it is not one of its inputs, such as PostgreSQL's
+    /// `SubPlan 1` or `CTE chain`: a subquery the parent runs for an expression.
+    pub role: Option<String>,
     /// The table, CTE or temporary result it reads.
     pub object: Option<String>,
     /// The index it uses.
@@ -139,6 +143,7 @@ impl PlanNode {
     pub fn new(operation: impl Into<String>) -> Self {
         Self {
             operation: operation.into(),
+            role: None,
             object: None,
             index: None,
             access_type: None,
@@ -269,12 +274,32 @@ pub struct ParseError {
 type Parser = fn(&ServerInfo, &ResultSet) -> Option<Result<Plan, ParseError>>;
 
 /// Every format reader. Each recognizes its own result shape and returns `None` for others.
-const PARSERS: &[Parser] = &[mysql_tree::parse, mysql_json::parse_v1, mysql_json::parse_v2, sqlite_eqp::parse];
+const PARSERS: &[Parser] =
+    &[mysql_tree::parse, mysql_json::parse_v1, mysql_json::parse_v2, postgres_json::parse, sqlite_eqp::parse];
 
 /// Reads a statement's result as a query plan. `None` when the result isn't a plan in a format
 /// with a parser; the caller then shows it as rows or as [`raw_text`].
 pub fn parse(server: &ServerInfo, result: &ResultSet) -> Option<Result<Plan, ParseError>> {
     PARSERS.iter().find_map(|parser| parser(server, result))
+}
+
+/// `(a = b)` → `a = b`, but `(a = b), (c = d)` stays as it is.
+fn strip_outer_parens(text: &str) -> &str {
+    if !(text.starts_with('(') && text.ends_with(')')) {
+        return text;
+    }
+    let mut depth = 0;
+    for (i, c) in text.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 && i < text.len() - 1 {
+            return text;
+        }
+    }
+    &text[1..text.len() - 1]
 }
 
 /// A result as plain text: the values of a one-column result line by line, otherwise aligned

@@ -12,7 +12,9 @@ use eframe::egui::{
 };
 use tableplus_core::ServerInfo;
 use tableplus_core::model::ResultSet;
-use tableplus_core::plan::{self, Extra, NodeId, Plan, PlanFormat, PlanNode, SPAN_SLACK};
+use tableplus_core::plan::{
+    self, Extra, FactKind, FactValue, NodeId, Plan, PlanFact, PlanFormat, PlanNode, SPAN_SLACK,
+};
 
 use crate::icons::Icon;
 use crate::plan_flame::{self, Flame, Pick};
@@ -108,6 +110,9 @@ pub struct PlanView {
     shown_at: Option<Instant>,
     /// `None` when no step was timed.
     flame: Option<Flame>,
+    /// Plan-wide figures, such as planning time; the detail panel summarizes them when no step is
+    /// selected.
+    facts: Vec<PlanFact>,
 }
 
 impl PlanView {
@@ -128,6 +133,7 @@ impl PlanView {
             scroll_id: None,
             shown_at: None,
             flame: None,
+            facts: Vec::new(),
         };
         if let PlanContent::Tree(plan) = &view.content {
             view.collapsed = vec![false; plan.node_count()];
@@ -147,6 +153,7 @@ impl PlanView {
             view.scale =
                 if plan.analyzed() { plan.total_ms().unwrap_or(0.0) } else { cost_spans[NodeId::ROOT.index()] };
             view.flame = Flame::new(plan);
+            view.facts = plan.facts();
             view.rebuild_visible();
         }
         view
@@ -272,16 +279,17 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut PlanView) {
         raw_view(ui, id, view.raw_text());
         return;
     }
-    if view.detail_open
-        && let Some(sel) = view.selected
-    {
+    if view.detail_open && (view.selected.is_some() || !view.facts.is_empty()) {
         let mut open = true;
         egui::Panel::right(id.with("detail"))
             .resizable(true)
             .default_size(300.0)
             .size_range(240.0..=680.0)
             .frame(egui::Frame::new().fill(p.content_bg).stroke(Stroke::new(1.0, p.border)))
-            .show(ui, |ui| detail(ui, view, sel, &mut open));
+            .show(ui, |ui| match view.selected {
+                Some(sel) => detail(ui, view, sel, &mut open),
+                None => plan_summary(ui, view, &mut open),
+            });
         view.detail_open = open;
     }
     egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| match (view.mode, &view.content) {
@@ -337,6 +345,10 @@ fn toolbar(ui: &mut Ui, id: Id, view: &mut PlanView, p: &Palette) {
                 if widgets::icon_button(ui, Icon::Copy, "Copy the server's output").clicked() {
                     ui.ctx().copy_text(view.raw_text().to_string());
                 }
+                if !view.facts.is_empty() && facts_button(ui, &view.facts, p).clicked() {
+                    view.selected = None;
+                    view.detail_open = true;
+                }
             });
         });
     });
@@ -353,6 +365,58 @@ fn text_button(ui: &mut Ui, text: &str) -> egui::Response {
     let color = if resp.hovered() { p.text } else { p.text_muted };
     ui.painter().galley(rect.center() - galley.size() / 2.0, galley, color);
     resp
+}
+
+/// JIT and trigger time get the warning colour from a tenth of the execution time, or when there
+/// is no execution time to compare with.
+fn stands_out(facts: &[PlanFact], fact: &PlanFact) -> bool {
+    let ms = |f: &PlanFact| match f.value {
+        FactValue::Ms(ms) => Some(ms),
+        FactValue::Cost(_) => None,
+    };
+    let execution = facts.iter().find(|f| f.kind == FactKind::Execution).and_then(ms).filter(|ms| *ms > 0.0);
+    fact.kind.notable() && execution.is_none_or(|e| ms(fact).is_some_and(|v| v >= e * 0.1))
+}
+
+fn fmt_fact(value: FactValue) -> String {
+    match value {
+        FactValue::Ms(ms) => fmt_ms(ms),
+        FactValue::Cost(cost) => fmt_rows(cost),
+    }
+}
+
+/// `Planning 0.42 ms · Execution 3.91 ms`, with JIT and trigger time that stands out in the
+/// warning colour. Ordinary figures give way first when the toolbar is narrow. Clicking it shows
+/// the plan's details.
+fn facts_button(ui: &mut Ui, facts: &[PlanFact], p: &Palette) -> egui::Response {
+    let job = |shown: &[&PlanFact]| {
+        let mut job = LayoutJob::default();
+        for (i, fact) in shown.iter().enumerate() {
+            let format =
+                |color: Color32| egui::TextFormat { font_id: theme::ui_font(12.0), color, ..Default::default() };
+            if i > 0 {
+                job.append("·", 7.0, format(p.text_faint));
+            }
+            job.append(fact.kind.label(), if i > 0 { 7.0 } else { 0.0 }, format(p.text_faint));
+            let value = if stands_out(facts, fact) { p.warning } else { p.text_muted };
+            job.append(&fmt_fact(fact.value), 4.0, format(value));
+        }
+        job
+    };
+    let mut shown: Vec<&PlanFact> = facts.iter().collect();
+    let room = ui.available_width() - 24.0;
+    let mut galley = ui.painter().layout_job(job(&shown));
+    while galley.size().x > room && shown.len() > 1 {
+        let drop = shown.iter().rposition(|f| !f.kind.notable()).unwrap_or(shown.len() - 1);
+        shown.remove(drop);
+        galley = ui.painter().layout_job(job(&shown));
+    }
+    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 16.0, 24.0), Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, CornerRadius::same(5), p.hover);
+    }
+    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, p.text_muted);
+    resp.on_hover_text("Show the plan's details")
 }
 
 fn banner(ui: &mut Ui, id: Id, text: &str, dot: Color32, p: &Palette) {
@@ -798,6 +862,7 @@ fn next_move(view: &PlanView, key: Key, page: usize) -> Option<Move> {
         (Key::Space | Key::Enter, Some(sel)) => Move::Fold(sel, !folded(sel)),
         (Key::Escape, Some(_)) if view.detail_open => Move::CloseDetail,
         (Key::Escape, Some(_)) => Move::Deselect,
+        (Key::Escape, None) if view.detail_open && !view.facts.is_empty() => Move::CloseDetail,
         _ => return None,
     })
 }
@@ -1136,7 +1201,107 @@ fn detail(ui: &mut Ui, view: &PlanView, id: NodeId, open: &mut bool) {
     });
 }
 
+/// The detail panel with no step selected: the plan-wide figures, the triggers PostgreSQL ran,
+/// and every plan-wide value as the server reported it.
+fn plan_summary(ui: &mut Ui, view: &PlanView, open: &mut bool) {
+    let p = palette(ui);
+    let Some(plan) = view.plan() else { return };
+    egui::ScrollArea::vertical().id_salt("plan_summary").auto_shrink([false, false]).show(ui, |ui| {
+        egui::Frame::NONE.inner_margin(egui::Margin::symmetric(14, 12)).show(ui, |ui| {
+            egui::Sides::new().shrink_left().show(
+                ui,
+                |ui| {
+                    ui.label(RichText::new("Plan").font(theme::bold_font(14.5)).color(p.text));
+                },
+                |ui| {
+                    if widgets::icon_button(ui, Icon::Close, "Close (Esc)").clicked() {
+                        *open = false;
+                    }
+                    if widgets::icon_button(ui, Icon::Copy, "Copy the plan-wide values").clicked() {
+                        let text: Vec<String> =
+                            plan.attributes.iter().map(|a| format!("{}: {}", a.key, a.value)).collect();
+                        ui.ctx().copy_text(text.join("\n"));
+                    }
+                },
+            );
+            let kind = if plan.analyzed() { "Analyzed" } else { "Estimated" };
+            let subtitle =
+                format!("{kind} · {} · {}", plan.format.label(), widgets::plural(plan.node_count() as u64, "step"));
+            ui.label(RichText::new(subtitle).font(theme::ui_font(12.5)).color(p.text_muted));
+
+            ui.add_space(12.0);
+            widgets::section_title(ui, if plan.analyzed() { "Measured" } else { "Estimated" });
+            egui::Grid::new("plan_summary_facts").num_columns(2).striped(false).spacing([14.0, 6.0]).show(ui, |ui| {
+                let mut row = |key: &str, value: String, color: Color32| {
+                    ui.label(RichText::new(key).size(12.0).color(p.text_muted));
+                    ui.label(RichText::new(value).size(12.5).color(color));
+                    ui.end_row();
+                };
+                if let Some(ms) = plan.total_ms() {
+                    row("Time in the plan", fmt_ms(ms), p.text);
+                }
+                for fact in &view.facts {
+                    let color = if stands_out(&view.facts, fact) { p.warning } else { p.text };
+                    row(fact.kind.label(), fmt_fact(fact.value), color);
+                }
+            });
+
+            let triggers = plan.triggers();
+            if !triggers.is_empty() {
+                ui.add_space(12.0);
+                widgets::section_title(ui, "Triggers");
+                egui::Grid::new("plan_summary_triggers").num_columns(2).striped(false).spacing([14.0, 6.0]).show(
+                    ui,
+                    |ui| {
+                        for t in &triggers {
+                            let name = match &t.relation {
+                                Some(relation) => format!("{}  ·  {relation}", t.name),
+                                None => t.name.clone(),
+                            };
+                            ui.label(RichText::new(name).size(12.0).color(p.text));
+                            let calls = t.calls.map(|c| widgets::plural(c, "call"));
+                            let value: Vec<String> = t.time_ms.map(fmt_ms).into_iter().chain(calls).collect();
+                            ui.label(RichText::new(value.join("  ·  ")).size(12.5).color(p.text_muted));
+                            ui.end_row();
+                        }
+                    },
+                );
+            }
+
+            ui.add_space(12.0);
+            widgets::section_title(ui, "Reported by the server");
+            egui::Grid::new("plan_summary_attrs").num_columns(2).striped(false).spacing([14.0, 6.0]).show(ui, |ui| {
+                for a in &plan.attributes {
+                    ui.label(RichText::new(&a.key).size(12.0).color(p.text_muted));
+                    ui.add(egui::Label::new(RichText::new(&a.value).font(theme::mono_font(11.5)).color(p.text)).wrap());
+                    ui.end_row();
+                }
+            });
+        });
+    });
+}
+
 /// A step as `key: value` lines, for the clipboard.
 pub(crate) fn node_text(node: &PlanNode) -> String {
     node.attributes.iter().map(|a| format!("{}: {}", a.key, a.value)).collect::<Vec<_>>().join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ms(kind: FactKind, ms: f64) -> PlanFact {
+        PlanFact { kind, value: FactValue::Ms(ms) }
+    }
+
+    #[test]
+    fn jit_and_triggers_stand_out_from_a_tenth_of_the_execution_time() {
+        let facts = [ms(FactKind::Planning, 0.2), ms(FactKind::Execution, 50.0), ms(FactKind::Jit, 4.0)];
+        assert!(!stands_out(&facts, &facts[2]), "8% of execution");
+        let facts = [ms(FactKind::Execution, 50.0), ms(FactKind::Triggers, 5.0)];
+        assert!(stands_out(&facts, &facts[1]));
+        assert!(!stands_out(&facts, &facts[0]), "execution itself is never a warning");
+        let facts = [ms(FactKind::Jit, 4.0)];
+        assert!(stands_out(&facts, &facts[0]), "nothing to compare with");
+    }
 }

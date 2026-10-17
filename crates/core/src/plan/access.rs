@@ -126,7 +126,7 @@ impl PlanNode {
         op.contains("join") || op.starts_with("nested loop")
     }
 
-    fn attribute(&self, key: &str) -> Option<&str> {
+    pub(super) fn attribute(&self, key: &str) -> Option<&str> {
         self.attributes.iter().find(|a| a.key == key).map(|a| a.value.as_str())
     }
 

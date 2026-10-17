@@ -9,7 +9,7 @@ use std::time::Duration;
 use common::*;
 use tableplus_core::config::Credentials;
 use tableplus_core::driver::{self, DynConnection};
-use tableplus_core::plan::{self, NodeId, Plan, PlanFormat, PlanNode};
+use tableplus_core::plan::{self, Explain, ExplainMode, NodeId, Plan, PlanFormat, PlanNode};
 use tableplus_core::{StatementResult, Value};
 
 #[tokio::test(flavor = "multi_thread")]
@@ -23,6 +23,7 @@ async fn the_bundled_library_measures_plan_steps() {
         options.iter().any(|o| o == "ENABLE_STMT_SCANSTATUS"),
         "built without SQLITE_ENABLE_STMT_SCANSTATUS; cargo reads LIBSQLITE3_FLAGS from .cargo/config.toml: {options:?}"
     );
+    assert!(conn.server_info().scan_status);
 }
 
 fn detail(node: &PlanNode) -> Option<&str> {
@@ -38,7 +39,10 @@ fn is_loop(detail: &str) -> bool {
     (detail.starts_with("SCAN ") || detail.starts_with("SEARCH ")) && detail != "SCAN CONSTANT ROW"
 }
 
+/// Explain Analyze as the app runs it.
 async fn measured(conn: &DynConnection, sql: &str) -> Plan {
+    let req = plan::request(&conn.server_info(), sql, ExplainMode::Analyze).unwrap_or_else(|e| panic!("{sql}: {e}"));
+    let Explain::Measure(sql) = &req.explain else { panic!("SQLite measures the statement itself: {req:?}") };
     let out = driver::measure(conn.as_ref(), sql).await.unwrap_or_else(|e| panic!("{sql}: {e:#}"));
     let rs = out.rows().expect("measured rows");
     let plan = plan::parse(&conn.server_info(), rs).expect("a plan").unwrap_or_else(|e| panic!("{e}"));
@@ -148,11 +152,14 @@ async fn never_measures_a_write() {
     let cfg = sqlite_fixture(dir.path()).await;
     let conn = driver::connect(&cfg, &Credentials::default()).await.unwrap();
     let before = checksum(&conn).await;
-    for sql in [
-        "UPDATE orders SET total = 0",
-        "DELETE FROM orders",
-        "WITH t AS (SELECT 1) INSERT INTO orders (user_id, placed_at) SELECT 1, '2024-01-01' FROM t",
+    for (sql, verb) in [
+        ("UPDATE orders SET total = 0", "UPDATE"),
+        ("DELETE FROM orders", "DELETE"),
+        ("WITH t AS (SELECT 1) INSERT INTO orders (user_id, placed_at) SELECT 1, '2024-01-01' FROM t", "INSERT"),
     ] {
+        let refused = plan::request(&conn.server_info(), sql, ExplainMode::Analyze).unwrap_err();
+        assert!(refused.0.contains(verb), "{sql}: {refused}");
+        // The driver refuses on its own too, by SQLite's account of the statement.
         let err = driver::measure(conn.as_ref(), sql).await.unwrap_err().to_string();
         assert!(err.contains("would change data"), "{sql}: {err}");
     }

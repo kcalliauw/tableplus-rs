@@ -8,7 +8,7 @@ use chrono::Utc;
 use eframe::egui::{self, Align, CornerRadius, Layout, RichText, Sense, Stroke, Ui, vec2};
 use tableplus_core::driver::{self, Connection};
 use tableplus_core::model::{QueryOutput, StatementResult};
-use tableplus_core::plan::{self, ExplainMode, ExplainStatements};
+use tableplus_core::plan::{self, Explain, ExplainMode, ExplainStatements};
 use tableplus_core::sqltext::{split_statements, statement_at};
 use tableplus_core::store::HistoryEntry;
 use tableplus_core::{Dialect, ServerInfo, Value};
@@ -559,7 +559,10 @@ async fn run_explain(conn: &dyn Connection, req: &ExplainStatements) -> Result<Q
         for sql in &req.setup {
             conn.query(sql, None).await?;
         }
-        driver::run(conn, &req.explain, None).await
+        match &req.explain {
+            Explain::Statement(sql) => driver::run(conn, sql, None).await,
+            Explain::Measure(sql) => driver::measure(conn, sql).await,
+        }
     };
     let result = explain.await.map_err(|e| format!("{e:#}"));
     for sql in &req.reset {
@@ -666,7 +669,7 @@ mod tests {
 
     fn explained(job: &Job) -> Option<&str> {
         match &job.step {
-            Ok(Step::Explain(req)) => Some(&req.explain),
+            Ok(Step::Explain(req)) => Some(req.explain.sql()),
             _ => None,
         }
     }
@@ -683,10 +686,13 @@ mod tests {
         let job = explain_job(&mysql, "select 1".into(), ExplainMode::Analyze);
         assert_eq!((explained(&job), job.note.as_deref()), (Some("EXPLAIN ANALYZE FORMAT=JSON select 1"), None));
 
-        let sqlite = ServerInfo::new(Flavor::Sqlite, Version::new(3, 53, 2));
+        let sqlite = ServerInfo::new(Flavor::Sqlite, Version::new(3, 53, 2)).with_scan_status(true);
         let job = explain_job(&sqlite, "select 1".into(), ExplainMode::Analyze);
-        assert_eq!(explained(&job), Some("EXPLAIN QUERY PLAN select 1"));
-        assert!(job.note.is_some());
+        assert!(matches!(&job.step, Ok(Step::Explain(r)) if r.explain == Explain::Measure("select 1".into())));
+        assert_eq!(job.note, None);
+        let job = explain_job(&sqlite, "delete from t".into(), ExplainMode::Analyze);
+        assert_eq!(explained(&job), Some("EXPLAIN QUERY PLAN delete from t"));
+        assert!(job.note.as_deref().is_some_and(|n| n.contains("DELETE") && n.contains("estimated plan")));
 
         let job = explain_job(&mysql, "explain select 1".into(), ExplainMode::Estimate);
         assert!(job.step.is_err());

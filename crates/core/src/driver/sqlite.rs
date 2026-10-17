@@ -113,7 +113,7 @@ impl Connection for SqliteConnection {
     }
 
     fn server_info(&self) -> ServerInfo {
-        ServerInfo::from_version_text(Flavor::Sqlite, &self.version)
+        ServerInfo::from_version_text(Flavor::Sqlite, &self.version).with_scan_status(self.scan_status)
     }
 
     fn database(&self) -> String {

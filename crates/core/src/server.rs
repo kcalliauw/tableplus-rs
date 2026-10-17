@@ -79,11 +79,18 @@ impl fmt::Display for Version {
 pub struct ServerInfo {
     pub flavor: Flavor,
     pub version: Version,
+    /// SQLite only: the library measures each plan step while a statement runs
+    /// (`SQLITE_ENABLE_STMT_SCANSTATUS`), which Explain Analyze needs. False for other engines.
+    pub scan_status: bool,
 }
 
 impl ServerInfo {
     pub const fn new(flavor: Flavor, version: Version) -> Self {
-        Self { flavor, version }
+        Self { flavor, version, scan_status: false }
+    }
+
+    pub const fn with_scan_status(self, scan_status: bool) -> Self {
+        Self { scan_status, ..self }
     }
 
     /// Builds the identity from the version text a server reports; an unreadable version

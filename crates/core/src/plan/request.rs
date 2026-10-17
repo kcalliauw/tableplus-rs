@@ -20,10 +20,30 @@ pub enum ExplainMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExplainStatements {
     pub setup: Vec<String>,
-    pub explain: String,
+    pub explain: Explain,
     pub reset: Vec<String>,
     /// The format the server answers in.
     pub format: PlanFormat,
+}
+
+/// How the plan is asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Explain {
+    /// An EXPLAIN statement, whose rows are the plan.
+    Statement(String),
+    /// The user's statement itself, run by
+    /// [`Connection::measure`](crate::driver::Connection::measure), which returns the plan with
+    /// what the database measured. SQLite works this way.
+    Measure(String),
+}
+
+impl Explain {
+    /// The statement the driver runs.
+    pub fn sql(&self) -> &str {
+        match self {
+            Explain::Statement(sql) | Explain::Measure(sql) => sql,
+        }
+    }
 }
 
 /// Why a plan can't be requested, phrased for the user.
@@ -32,7 +52,14 @@ pub struct ExplainStatements {
 pub struct Unsupported(pub String);
 
 enum Recipe {
-    Wrap { prefix: &'static str, format: PlanFormat, setup: &'static [&'static str], reset: &'static [&'static str] },
+    Wrap {
+        prefix: &'static str,
+        format: PlanFormat,
+        setup: &'static [&'static str],
+        reset: &'static [&'static str],
+    },
+    /// The driver runs the statement and measures it ([`Explain::Measure`]).
+    Measure(PlanFormat),
     Unsupported(&'static str),
 }
 
@@ -71,6 +98,8 @@ const fn json_v2(mode: ExplainMode, prefix: &'static str) -> Rule {
 const ANY: Version = Version::new(0, 0, 0);
 const MYSQL_TREE: Version = Version::new(8, 0, 18);
 const MYSQL_JSON_V2: Version = Version::new(8, 4, 0);
+/// `sqlite3_stmt_scanstatus_v2`, with every plan step and its ids and cycles.
+const SQLITE_SCAN_STATUS: Version = Version::new(3, 42, 0);
 
 use ExplainMode::{Analyze, Estimate};
 use Flavor::{MariaDb, MySql, Postgres, Sqlite};
@@ -87,7 +116,13 @@ const RULES: &[Rule] = &[
     wrap(Postgres, Estimate, ANY, "EXPLAIN (FORMAT JSON) ", PlanFormat::PostgresJson),
     wrap(Postgres, Analyze, ANY, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ", PlanFormat::PostgresJson),
     wrap(Sqlite, Estimate, ANY, "EXPLAIN QUERY PLAN ", PlanFormat::SqliteQueryPlan),
-    unsupported(Sqlite, Analyze, ANY, "SQLite can't measure a statement while it runs."),
+    unsupported(Sqlite, Analyze, ANY, "Explain Analyze needs SQLite 3.42 or later."),
+    Rule {
+        flavor: Sqlite,
+        mode: Analyze,
+        since: SQLITE_SCAN_STATUS,
+        recipe: Recipe::Measure(PlanFormat::SqliteScanStatus),
+    },
 ];
 
 /// The statements that explain `sql` on `server`.
@@ -110,8 +145,18 @@ pub fn request(server: &ServerInfo, sql: &str, mode: ExplainMode) -> Result<Expl
     match rule.recipe {
         Recipe::Wrap { prefix, format, setup, reset } => Ok(ExplainStatements {
             setup: setup.iter().map(|s| s.to_string()).collect(),
-            explain: format!("{prefix}{sql}"),
+            explain: Explain::Statement(format!("{prefix}{sql}")),
             reset: reset.iter().map(|s| s.to_string()).collect(),
+            format,
+        }),
+        Recipe::Measure(_) if !server.scan_status => Err(Unsupported(
+            "This SQLite library was built without SQLITE_ENABLE_STMT_SCANSTATUS, so it can't measure the statement."
+                .into(),
+        )),
+        Recipe::Measure(format) => Ok(ExplainStatements {
+            setup: Vec::new(),
+            explain: Explain::Measure(sql.to_string()),
+            reset: Vec::new(),
             format,
         }),
         Recipe::Unsupported(reason) => Err(Unsupported(reason.into())),
@@ -234,10 +279,10 @@ mod tests {
     const MYSQL_84: ServerInfo = ServerInfo::new(MySql, Version::new(8, 4, 11));
     const MARIADB: ServerInfo = ServerInfo::new(MariaDb, Version::new(11, 4, 13));
     const POSTGRES: ServerInfo = ServerInfo::new(Postgres, Version::new(17, 6, 0));
-    const SQLITE: ServerInfo = ServerInfo::new(Sqlite, Version::new(3, 53, 2));
+    const SQLITE: ServerInfo = ServerInfo::new(Sqlite, Version::new(3, 53, 2)).with_scan_status(true);
 
     fn explain(server: ServerInfo, sql: &str, mode: ExplainMode) -> Result<String, String> {
-        request(&server, sql, mode).map(|r| r.explain).map_err(|e| e.0)
+        request(&server, sql, mode).map(|r| r.explain.sql().to_string()).map_err(|e| e.0)
     }
 
     #[test]
@@ -261,7 +306,7 @@ mod tests {
             (SQLITE, Estimate, "EXPLAIN QUERY PLAN select * from orders", PlanFormat::SqliteQueryPlan),
         ] {
             let r = request(&server, q, mode).unwrap_or_else(|e| panic!("{server} {mode:?}: {e}"));
-            assert_eq!(r.explain, expected, "{server} {mode:?}");
+            assert_eq!(r.explain, Explain::Statement(expected.into()), "{server} {mode:?}");
             assert_eq!(r.format, format, "{server} {mode:?}");
             assert!(r.setup.is_empty() && r.reset.is_empty());
         }
@@ -275,7 +320,7 @@ mod tests {
         ] {
             for server in [MYSQL_84, ServerInfo::new(MySql, Version::new(9, 7, 2))] {
                 let r = request(&server, "select * from orders", mode).unwrap();
-                assert_eq!((r.explain.as_str(), r.format), (expected, PlanFormat::MySqlJsonV2), "{server} {mode:?}");
+                assert_eq!((r.explain.sql(), r.format), (expected, PlanFormat::MySqlJsonV2), "{server} {mode:?}");
                 assert_eq!(r.setup.len(), 1);
                 assert!(r.setup[0].contains("explain_json_format_version = 2"), "{}", r.setup[0]);
                 assert!(r.setup[0].contains("@tableplus_explain_json_format = @@SESSION.explain_json_format_version"));
@@ -289,7 +334,17 @@ mod tests {
         let q = "select 1";
         assert!(explain(MYSQL_57, q, Analyze).unwrap_err().contains("8.0.18"));
         assert!(explain(ServerInfo::new(MySql, Version::new(8, 0, 17)), q, Analyze).is_err());
-        assert!(explain(SQLITE, q, Analyze).is_err());
+        assert!(explain(ServerInfo::new(Sqlite, Version::new(3, 41, 2)).with_scan_status(true), q, Analyze).is_err());
+        let without = explain(ServerInfo::new(Sqlite, Version::new(3, 53, 2)), q, Analyze).unwrap_err();
+        assert!(without.contains("SQLITE_ENABLE_STMT_SCANSTATUS"), "{without}");
+    }
+
+    #[test]
+    fn sqlite_measures_the_statement_itself() {
+        let r = request(&SQLITE, "select * from orders;", Analyze).unwrap();
+        assert_eq!(r.explain, Explain::Measure("select * from orders".into()));
+        assert_eq!(r.format, PlanFormat::SqliteScanStatus);
+        assert!(r.setup.is_empty() && r.reset.is_empty());
     }
 
     #[test]
@@ -327,6 +382,11 @@ mod tests {
             (POSTGRES, "create table t as select 1", "CREATE"),
             (MARIADB, "call refresh_stats()", "CALL"),
             (MYSQL_84, "s.country, count(distinct od.order_id)", "statement"),
+            (SQLITE, "UPDATE products SET unit_price = unit_price * 1.05", "UPDATE"),
+            (SQLITE, "insert or replace into t values (1)", "INSERT"),
+            (SQLITE, "replace into t values (1)", "REPLACE"),
+            (SQLITE, "with x as (select 1) delete from t where a in (select * from x)", "DELETE"),
+            (SQLITE, "pragma user_version = 3", "statement"),
         ] {
             let err = explain(server, sql, Analyze).unwrap_err();
             assert!(err.contains(verb), "{sql}: {err}");

@@ -12,7 +12,7 @@ use eframe::egui::{
 };
 use tableplus_core::ServerInfo;
 use tableplus_core::model::ResultSet;
-use tableplus_core::plan::{self, NodeId, Plan, PlanFormat, PlanNode, SPAN_SLACK};
+use tableplus_core::plan::{self, Extra, NodeId, Plan, PlanFormat, PlanNode, SPAN_SLACK};
 
 use crate::icons::Icon;
 use crate::plan_flame::{self, Flame, Pick};
@@ -25,6 +25,8 @@ const HEADER_H: f32 = 28.0;
 const PAD: f32 = 10.0;
 const CHEVRON: f32 = 16.0;
 const BAR_H: f32 = 8.0;
+/// Horizontal room around a `temp table` badge's text.
+const BADGE_PAD: f32 = 10.0;
 const GROW_SECONDS: f32 = 0.45;
 
 /// What a Plan pane shows.
@@ -72,6 +74,7 @@ struct Metrics {
     cost: Option<f64>,
     /// The cost, or what the steps below cost in all when that is more.
     cost_span: f64,
+    extras: Vec<Extra>,
     descendants: usize,
 }
 
@@ -136,6 +139,7 @@ impl PlanView {
                     self_ms: plan.self_ms(id),
                     cost: plan.estimated_cost(id).map(|c| c.total),
                     cost_span: cost_spans[id.index()],
+                    extras: plan.extras(id),
                     descendants: plan.descendant_count(id),
                 })
                 .collect();
@@ -566,8 +570,15 @@ fn tree(ui: &mut Ui, id: Id, view: &mut PlanView) {
 
             let text_left = x + CHEVRON + 4.0;
             let hint = collapsed.then(|| format!("+{}", fmt_count(m.descendants as u64)));
-            let max_w = (metrics_left - text_left - 10.0 - if hint.is_some() { 44.0 } else { 0.0 }).max(20.0);
-            let galley = label(ui, node, max_w, on_accent, p);
+            let badge_color = if on_accent { p.accent_text.gamma_multiply(0.85) } else { p.text_muted };
+            let badges: Vec<Arc<Galley>> = m
+                .extras
+                .iter()
+                .map(|e| ui.painter().layout_no_wrap(e.label().into(), theme::ui_font(10.5), badge_color))
+                .collect();
+            let badges_w: f32 = badges.iter().map(|g| g.size().x + BADGE_PAD + 6.0).sum();
+            let room = metrics_left - text_left - 10.0 - badges_w - if hint.is_some() { 44.0 } else { 0.0 };
+            let galley = label(ui, node, room.max(20.0), on_accent, p);
             let label_w = galley.size().x;
             if galley.elided && hovered_row == Some(r) && hover_x < metrics_left {
                 body.clone().on_hover_ui_at_pointer(|ui| {
@@ -575,11 +586,15 @@ fn tree(ui: &mut Ui, id: Id, view: &mut PlanView) {
                 });
             }
             tp.galley(pos2(text_left, cy - galley.size().y / 2.0), galley, p.text);
+            let mut after = text_left + label_w + 8.0;
+            let badge_border = if on_accent { p.accent_text.gamma_multiply(0.45) } else { p.border };
+            for g in badges {
+                after += extra_badge(&tp, pos2(after, cy), g, badge_color, badge_border) + 6.0;
+            }
             if let Some(hint) = hint {
                 let color = if on_accent { p.accent_text } else { p.text_muted };
                 let g = ui.painter().layout_no_wrap(hint, theme::bold_font(10.5), color);
-                let pill =
-                    Rect::from_min_size(pos2(text_left + label_w + 8.0, cy - 8.0), vec2(g.size().x + 12.0, 16.0));
+                let pill = Rect::from_min_size(pos2(after, cy - 8.0), vec2(g.size().x + 12.0, 16.0));
                 tp.rect_filled(
                     pill,
                     CornerRadius::same(8),
@@ -822,6 +837,14 @@ fn label(ui: &Ui, node: &PlanNode, max_w: f32, on_accent: bool, p: &Palette) -> 
     ui.painter().layout_job(job)
 }
 
+/// `temp table`, `filesort`: an outlined tag starting at `left_center`. Returns its width.
+fn extra_badge(painter: &Painter, left_center: Pos2, galley: Arc<Galley>, color: Color32, border: Color32) -> f32 {
+    let rect = Rect::from_min_size(pos2(left_center.x, left_center.y - 7.5), vec2(galley.size().x + BADGE_PAD, 15.0));
+    painter.rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, border), egui::StrokeKind::Inside);
+    painter.galley(rect.center() - galley.size() / 2.0, galley, color);
+    rect.width()
+}
+
 fn chevron(painter: &Painter, center: Pos2, open: f32, color: Color32) {
     let (s, c) = (open * std::f32::consts::FRAC_PI_2).sin_cos();
     let rot = |x: f32, y: f32| center + vec2(x * c - y * s, x * s + y * c);
@@ -992,6 +1015,30 @@ fn detail(ui: &mut Ui, view: &PlanView, id: NodeId, open: &mut bool) {
                 };
                 ui.label(RichText::new(text).font(theme::ui_font(12.5)).color(p.text_muted));
             }
+            let access = plan.access(id);
+            if access.is_some() || !m.extras.is_empty() {
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    if let Some(access) = access {
+                        let (r, _) = ui.allocate_exact_size(vec2(8.0, 15.0), Sense::hover());
+                        let swatch = Rect::from_center_size(r.center(), vec2(8.0, 8.0));
+                        let color = plan_graph::access_color(access, ui.visuals().dark_mode);
+                        ui.painter().rect_filled(swatch, CornerRadius::same(2), color);
+                        ui.label(RichText::new(access.label()).size(12.0).color(p.text_muted));
+                    }
+                    for extra in &m.extras {
+                        let g = ui.painter().layout_no_wrap(extra.label().into(), theme::ui_font(10.5), p.text_muted);
+                        let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + BADGE_PAD, 15.0), Sense::hover());
+                        extra_badge(ui.painter(), r.left_center(), g, p.text_muted, p.border);
+                        resp.on_hover_text(extra.description());
+                    }
+                });
+            }
+            if m.descendants > 0 {
+                let below = format!("{} below", widgets::plural(m.descendants as u64, "step"));
+                ui.label(RichText::new(below).size(12.0).color(p.text_faint));
+            }
             if let Some(condition) = &node.condition {
                 ui.add_space(6.0);
                 egui::Frame::new()
@@ -1008,7 +1055,8 @@ fn detail(ui: &mut Ui, view: &PlanView, id: NodeId, open: &mut bool) {
                     });
             }
 
-            let mut facts: Vec<(&str, String, Option<Color32>)> = Vec::new();
+            let mut measured: Vec<(&str, String, Option<Color32>)> = Vec::new();
+            let facts = &mut measured;
             if let Some(total) = m.inclusive_ms {
                 facts.push(("Time, with steps below", fmt_ms(total), None));
             }
@@ -1032,6 +1080,8 @@ fn detail(ui: &mut Ui, view: &PlanView, id: NodeId, open: &mut bool) {
                     facts.push(("Rows in all loops", fmt_rows(rows * actual.loops as f64), None));
                 }
             }
+            let mut estimated: Vec<(&str, String, Option<Color32>)> = Vec::new();
+            let facts = &mut estimated;
             if node.estimate.is_some() {
                 let rows = plan.estimated_rows(id);
                 let faint = rows.is_none().then_some(p.text_faint);
@@ -1055,14 +1105,17 @@ fn detail(ui: &mut Ui, view: &PlanView, id: NodeId, open: &mut bool) {
                 };
                 facts.push(("Estimate", text, plan.is_misestimated(id).then_some(p.warning)));
             }
-            if m.descendants > 0 {
-                facts.push(("Steps below", fmt_count(m.descendants as u64), None));
-            }
-            if !facts.is_empty() {
+            let heading = match (measured.is_empty(), estimated.is_empty()) {
+                (false, false) => Some("Measured and estimated"),
+                (false, true) => Some("Measured"),
+                (true, false) => Some("Estimated"),
+                (true, true) => None,
+            };
+            if let Some(heading) = heading {
                 ui.add_space(12.0);
-                widgets::section_title(ui, "Measured and estimated");
+                widgets::section_title(ui, heading);
                 egui::Grid::new(("plan_facts", id)).num_columns(2).striped(false).spacing([14.0, 6.0]).show(ui, |ui| {
-                    for (k, v, color) in facts {
+                    for (k, v, color) in measured.into_iter().chain(estimated) {
                         ui.label(RichText::new(k).size(12.0).color(p.text_muted));
                         ui.label(RichText::new(v).size(12.5).color(color.unwrap_or(p.text)));
                         ui.end_row();

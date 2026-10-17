@@ -13,7 +13,7 @@ use eframe::egui::{
 use tableplus_core::ServerInfo;
 use tableplus_core::model::ResultSet;
 use tableplus_core::plan::{
-    self, Extra, FactKind, FactValue, NodeId, Plan, PlanFact, PlanFormat, PlanNode, SPAN_SLACK,
+    self, Access, Extra, FactKind, FactValue, NodeId, Plan, PlanFact, PlanFormat, PlanNode, SPAN_SLACK,
 };
 
 use crate::icons::Icon;
@@ -77,6 +77,7 @@ struct Metrics {
     /// The cost, or what the steps below cost in all when that is more.
     cost_span: f64,
     extras: Vec<Extra>,
+    access: Option<Access>,
     descendants: usize,
 }
 
@@ -146,6 +147,7 @@ impl PlanView {
                     cost: plan.estimated_cost(id).map(|c| c.total),
                     cost_span: cost_spans[id.index()],
                     extras: plan.extras(id),
+                    access: plan.access(id),
                     descendants: plan.descendant_count(id),
                 })
                 .collect();
@@ -632,7 +634,18 @@ fn tree(ui: &mut Ui, id: Id, view: &mut PlanView) {
                 chevron(&tp, pos2(x + CHEVRON / 2.0, cy), open, if on_accent { p.accent_text } else { p.text_muted });
             }
 
-            let text_left = x + CHEVRON + 4.0;
+            // The graph's access colour: in the chevron's place on a leaf, before the text otherwise.
+            let mut text_left = x + CHEVRON + 4.0;
+            if let Some(access) = m.access {
+                let center = if plan.children(node_id).is_empty() {
+                    pos2(x + CHEVRON / 2.0, cy)
+                } else {
+                    text_left += 11.0;
+                    pos2(text_left - 7.5, cy)
+                };
+                let swatch = Rect::from_center_size(center, vec2(7.0, 7.0));
+                tp.rect_filled(swatch, CornerRadius::same(2), plan_graph::access_color(access, ui.visuals().dark_mode));
+            }
             let hint = collapsed.then(|| format!("+{}", fmt_count(m.descendants as u64)));
             let badge_color = if on_accent { p.accent_text.gamma_multiply(0.85) } else { p.text_muted };
             let badges: Vec<Arc<Galley>> = m

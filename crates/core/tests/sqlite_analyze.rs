@@ -7,10 +7,10 @@ mod common;
 use std::time::Duration;
 
 use common::*;
-use tableplus_core::config::Credentials;
+use tableplus_core::config::{ConnectionConfig, Credentials, DriverKind};
 use tableplus_core::driver::{self, DynConnection};
 use tableplus_core::plan::{self, Explain, ExplainMode, NodeId, Plan, PlanFormat, PlanNode};
-use tableplus_core::{StatementResult, Value};
+use tableplus_core::{Dialect, StatementResult, Value};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_bundled_library_measures_plan_steps() {
@@ -118,6 +118,8 @@ async fn measures_every_step_of_a_statement() {
     assert_eq!((coroutine.rows, coroutine.loops), (Some(orders), 1), "one row per order, from one run");
     let reader = find(&plan, "SCAN t").actual.unwrap();
     assert_eq!((reader.rows, reader.time), (Some(orders), None), "the co-routine's time is not counted twice");
+    let lookup = find(&plan, "SEARCH o USING INTEGER PRIMARY KEY (rowid=?)").actual.unwrap();
+    assert_eq!((lookup.rows, lookup.loops as f64), (Some(1.0), orders), "one lookup per order, finding that order");
     let inner = find(&plan, "SCAN order_items USING INDEX sqlite_autoindex_order_items_1").actual.unwrap();
     assert_eq!(inner.rows, Some(number(&conn, "SELECT count(*) FROM order_items").await));
     let returned = plan.node(NodeId::ROOT).actual.unwrap().rows.unwrap();
@@ -139,6 +141,49 @@ async fn measures_every_step_of_a_statement() {
     assert!(find(&plan, "CO-ROUTINE tree").actual.is_none(), "read through an automatic index, not a SCAN");
     let index = find(&plan, "CREATE AUTOMATIC INDEX ON tree(id, depth)");
     assert_eq!(index.actual.map(|a| (a.rows, a.loops)), Some((Some(10.0), 1)), "one entry per category");
+}
+
+/// The EXPLAIN lab's `portable` and `modern` queries on its Northwind database. Skipped without
+/// the lab (see `common/golden.rs`).
+#[tokio::test(flavor = "multi_thread")]
+async fn measures_the_lab_queries_on_northwind() {
+    let Some(goldens) = golden::dir() else { return };
+    let script = std::fs::read_to_string(goldens.join("../northwind/sqlite.sql")).expect("the lab's Northwind script");
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = ConnectionConfig::new(DriverKind::Sqlite);
+    cfg.path = dir.path().join("northwind.sqlite").to_string_lossy().into_owned();
+    let conn = driver::connect(&cfg, &Credentials::default()).await.unwrap();
+    let statements = tableplus_core::export::sql_script_statements(&script, Dialect::Sqlite);
+    conn.execute_in_transaction(&statements).await.unwrap();
+    let lab_query = |query: &str| {
+        let g = golden::one("sqlite-bundled", query, "query-plan").expect("the lab's SQLite goldens");
+        g.statement.strip_prefix("EXPLAIN QUERY PLAN ").expect("an EXPLAIN QUERY PLAN golden").to_string()
+    };
+
+    let plan = check_measured(&conn, &lab_query("portable")).await;
+    assert_eq!(plan.node(NodeId::ROOT).actual.unwrap().rows, Some(20.0), "LIMIT 20");
+    let coroutine = find(&plan, "CO-ROUTINE t").actual.unwrap();
+    let orders = number(&conn, "SELECT count(DISTINCT order_id) FROM order_details").await;
+    assert_eq!((coroutine.rows, coroutine.loops), (Some(orders), 1), "one row per order, from one run");
+    assert_eq!(find(&plan, "SCAN t").actual.unwrap().time, None, "its time moved to the co-routine");
+    let details = find(&plan, "SCAN od USING INDEX sqlite_autoindex_order_details_1").actual.unwrap();
+    assert_eq!(details.rows, Some(number(&conn, "SELECT count(*) FROM order_details").await));
+    for half in ["LEFT", "RIGHT"] {
+        assert!(find(&plan, half).actual.is_none(), "{half} reports no numbers of its own");
+    }
+
+    let plan = check_measured(&conn, &lab_query("modern")).await;
+    let ranked = plan.nodes().find(|(_, n)| detail(n) == Some("MATERIALIZE ranked")).map(|(id, n)| (id, n.actual));
+    let (ranked, actual) = ranked.expect("MATERIALIZE ranked");
+    assert_eq!(actual, None, "SQLite counts no loops for a materialization");
+    assert!(plan.children(ranked).iter().any(|c| plan.inclusive_ms(*c).is_some()), "its children keep their time");
+    let window = find(&plan, "CO-ROUTINE (subquery-6)").actual.unwrap();
+    assert_eq!(window.rows, Some(number(&conn, "SELECT count(*) FROM orders").await), "one row per order");
+    assert_eq!(
+        find(&plan, "SCAN employees").actual.unwrap().rows,
+        Some(9.0),
+        "SETUP reads all 9 employees to find the top of the chain"
+    );
 }
 
 async fn checksum(conn: &DynConnection) -> Option<String> {

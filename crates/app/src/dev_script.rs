@@ -11,6 +11,7 @@
 //! drag 640 400 640 200     press, move and release
 //! move 640 400
 //! scroll 0 -120
+//! pinch 1.5                 a trackpad pinch, zooming by that factor
 //! key cmd+shift+E           also Enter, Escape, Down, Left, … (`cmd` is Ctrl off macOS)
 //! type select 1             typed text
 //! paste /tmp/query.sql      a file's contents, as if pasted
@@ -38,6 +39,7 @@ enum Command {
     },
     Move(Pos2),
     Scroll(egui::Vec2),
+    Pinch(f32),
     Key(Modifiers, Key),
     Text(String),
     Paste(String),
@@ -131,6 +133,7 @@ impl DevScript {
                     modifiers: Modifiers::NONE,
                     phase: egui::TouchPhase::Move,
                 }),
+                Command::Pinch(factor) => input.events.push(Event::Zoom(factor)),
                 Command::Key(modifiers, key) => {
                     for pressed in [true, false] {
                         input.events.push(Event::Key { key, physical_key: None, pressed, repeat: false, modifiers });
@@ -186,6 +189,7 @@ fn parse(line: &str) -> Option<Vec<Command>> {
             ]);
         }
         "scroll" => Command::Scroll(xy()?.to_vec2()),
+        "pinch" => Command::Pinch(rest.trim().parse().ok()?),
         "size" => Command::Size(xy().map(|p| vec2(p.x, p.y))?),
         "key" => {
             let mut modifiers = Modifiers::NONE;

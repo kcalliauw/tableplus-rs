@@ -13,7 +13,7 @@ use eframe::egui::{
     self, Align2, Color32, CornerRadius, CursorIcon, EventFilter, Id, Key, Pos2, Rect, Sense, Stroke, StrokeKind, Ui,
     Vec2, pos2, vec2,
 };
-use tableplus_core::plan::{Access, NodeId, Plan};
+use tableplus_core::plan::{Access, Extra, NodeId, Plan, SPAN_SLACK};
 
 use crate::icons::{self, Icon};
 use crate::theme::{self, palette};
@@ -53,9 +53,13 @@ struct Step {
     loops: Option<String>,
     /// Time including the steps below, or the estimated cost.
     value: Option<String>,
-    /// Share of the statement's time with and without the steps below, or of the costliest
-    /// step's cost.
+    /// Share of the statement's time with and without the steps below; without actuals, share of
+    /// the plan's cost with the steps below the step doesn't count, and its own.
     bar: Option<(f32, f32)>,
+    /// `Estimated 1,616 rows, cost 757`, for the tooltip.
+    estimate: Option<String>,
+    /// `temp table`, `filesort`: side work the colour doesn't show.
+    extras: Vec<Extra>,
     misestimate: Option<f64>,
     descendants: usize,
 }
@@ -324,11 +328,8 @@ fn ease_out(t: f32) -> f32 {
 
 fn prepare(plan: &Plan, collapsed: &[bool]) -> Prepared {
     let analyzed = plan.analyzed();
-    let scale = if analyzed {
-        plan.nodes().filter_map(|(id, _)| plan.inclusive_ms(id)).fold(plan.total_ms().unwrap_or(0.0), f64::max)
-    } else {
-        plan.nodes().filter_map(|(_, n)| n.estimate?.cost.map(|c| c.total)).fold(0.0, f64::max)
-    };
+    let cost_spans = plan.cost_spans();
+    let scale = if analyzed { plan.total_ms().unwrap_or(0.0) } else { cost_spans[NodeId::ROOT.index()] };
     let share = |v: f64| if scale > 0.0 { (v / scale).clamp(0.0, 1.0) as f32 } else { 0.0 };
     let steps: Vec<Step> = plan
         .nodes()
@@ -344,21 +345,30 @@ fn prepare(plan: &Plan, collapsed: &[bool]) -> Prepared {
                 let bar = inclusive.map(|t| (share(t), share(plan.self_ms(id).unwrap_or(0.0))));
                 (rows, loops, inclusive.map(fmt_ms), bar)
             } else {
-                let rows = node.estimate.filter(|e| e.rows > 0.0).map(|e| format!("≈ {}", rows_text(e.rows)));
-                // MySQL prints `cost=0 rows=0` on steps it doesn't estimate.
-                let cost = node.estimate.and_then(|e| e.cost.filter(|c| e.rows > 0.0 || c.total > 0.0));
-                let bar = cost.map(|c| (share(c.total), 0.0));
+                let rows = plan.estimated_rows(id).map(|rows| format!("≈ {}", rows_text(rows)));
+                let cost = plan.estimated_cost(id);
+                let own = cost.map_or(0.0, |c| c.total);
+                let span = cost_spans[id.index()];
+                let bar = (span > 0.0).then(|| (share(if span > own * SPAN_SLACK { span } else { own }), share(own)));
                 (rows.unwrap_or_default(), None, cost.map(|c| format!("cost {}", fmt_rows(c.total))), bar)
             };
+            let estimate_parts: Vec<String> = plan
+                .estimated_rows(id)
+                .map(rows_text)
+                .into_iter()
+                .chain(plan.estimated_cost(id).map(|c| format!("cost {}", fmt_rows(c.total))))
+                .collect();
             Step {
-                access: node.access(),
+                estimate: (!estimate_parts.is_empty()).then(|| format!("Estimated {}", estimate_parts.join(", "))),
+                access: plan.access(id),
+                extras: plan.extras(id),
                 join: node.is_join(),
                 flow: flow(plan, id, analyzed),
                 rows,
                 loops,
                 value,
                 bar,
-                misestimate: node.row_estimate_ratio().filter(|_| node.is_misestimated()),
+                misestimate: plan.row_estimate_ratio(id).filter(|_| plan.is_misestimated(id)),
                 descendants: plan.descendant_count(id),
             }
         })
@@ -370,7 +380,8 @@ fn prepare(plan: &Plan, collapsed: &[bool]) -> Prepared {
         (None, Some(ms)) => fmt_ms(ms),
         (None, None) => String::new(),
     };
-    let order = [Access::FullScan, Access::IndexScan, Access::Range, Access::Lookup, Access::Constant];
+    let order =
+        [Access::FullScan, Access::IndexScan, Access::Range, Access::Lookup, Access::Constant, Access::InternalResult];
     let legend = order.into_iter().filter(|a| steps.iter().any(|s| s.access.map(legend_class) == Some(*a))).collect();
     Prepared {
         ids: plan.nodes().map(|(id, _)| id).collect(),
@@ -388,18 +399,15 @@ fn rows_text(rows: f64) -> String {
 }
 
 /// Rows a step passes up over all its loops, or its estimate per loop. A step without numbers,
-/// such as MySQL's `Hash`, passes on what its children produce. MySQL estimates zero rows for
-/// steps it doesn't estimate, such as temporary tables, so those carry no number.
+/// such as MySQL's `Hash`, passes on what its children produce. A step MySQL marks as not
+/// estimated carries no number: the steps below a limit say nothing about what it returns.
 fn flow(plan: &Plan, id: NodeId, analyzed: bool) -> Option<f64> {
     let node = plan.node(id);
-    let own = if analyzed {
-        node.actual.and_then(|a| a.rows.map(|r| r * a.loops as f64))
-    } else {
-        node.estimate.map(|e| e.rows)
-    };
+    let own =
+        if analyzed { node.actual.and_then(|a| a.rows.map(|r| r * a.loops as f64)) } else { plan.estimated_rows(id) };
     match own {
-        Some(rows) if analyzed || rows > 0.0 => Some(rows),
-        Some(_) => None,
+        Some(rows) => Some(rows),
+        None if !analyzed && node.estimate.is_some() => None,
         None => {
             let below: Vec<f64> = plan.children(id).iter().filter_map(|c| flow(plan, *c, analyzed)).collect();
             (!below.is_empty()).then(|| below.iter().sum())
@@ -408,7 +416,9 @@ fn flow(plan: &Plan, id: NodeId, analyzed: bool) -> Option<f64> {
 }
 
 /// Workbench's colours: red for a full table scan, red-orange for a full index scan, orange for a
-/// range, green for key lookups and blue for a constant row.
+/// range, green for key lookups and blue for a constant row. Reading back a temporary result
+/// gets a muted violet instead of Workbench's red: no index can make that read cheaper, so red
+/// would point at a step the user can't change.
 pub(crate) fn access_color(access: Access, dark: bool) -> Color32 {
     let (light, night) = match access {
         Access::FullScan => (0xE5484D, 0xFF6369),
@@ -416,6 +426,7 @@ pub(crate) fn access_color(access: Access, dark: bool) -> Color32 {
         Access::Range => (0xE59A00, 0xFFBA3B),
         Access::Lookup | Access::UniqueLookup => (0x2E9E5B, 0x3DD68C),
         Access::Constant => (0x1B9BD8, 0x55C3F7),
+        Access::InternalResult => (0x8E86B0, 0xA29BC9),
     };
     let rgb: u32 = if dark { night } else { light };
     Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)

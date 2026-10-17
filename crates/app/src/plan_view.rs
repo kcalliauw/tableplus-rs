@@ -12,19 +12,25 @@ use eframe::egui::{
 };
 use tableplus_core::ServerInfo;
 use tableplus_core::model::ResultSet;
-use tableplus_core::plan::{self, NodeId, Plan, PlanFormat, PlanNode};
+use tableplus_core::plan::{self, Access, Extra, NodeId, Plan, PlanFact, PlanFormat, PlanNode, SPAN_SLACK};
 
 use crate::icons::Icon;
 use crate::plan_flame::{self, Flame, Pick};
 use crate::plan_graph::{self, GraphView};
 use crate::theme::{self, Palette, palette};
 use crate::widgets::{self, fmt_count, fmt_factor, fmt_ms, fmt_rows};
+pub(crate) use detail::node_text;
+use detail::{detail, fmt_fact, plan_summary, stands_out};
+
+mod detail;
 
 const ROW_H: f32 = 26.0;
 const HEADER_H: f32 = 28.0;
 const PAD: f32 = 10.0;
 const CHEVRON: f32 = 16.0;
 const BAR_H: f32 = 8.0;
+/// Horizontal room around a `temp table` badge's text.
+const BADGE_PAD: f32 = 10.0;
 const GROW_SECONDS: f32 = 0.45;
 
 /// What a Plan pane shows.
@@ -68,7 +74,21 @@ enum Mode {
 struct Metrics {
     inclusive_ms: Option<f64>,
     self_ms: Option<f64>,
+    /// The planner's total cost, without MySQL's placeholder.
+    cost: Option<f64>,
+    /// The cost, or what the steps below cost in all when that is more.
+    cost_span: f64,
+    extras: Vec<Extra>,
+    access: Option<Access>,
     descendants: usize,
+}
+
+impl Metrics {
+    /// The steps below cost more than this step counts, as MySQL's steps above a temporary table
+    /// do, so its bar spans them.
+    fn spans_below(&self) -> bool {
+        self.cost_span > self.cost.unwrap_or(0.0) * SPAN_SLACK
+    }
 }
 
 pub struct PlanView {
@@ -81,8 +101,10 @@ pub struct PlanView {
     /// Rows on screen, top to bottom: the nodes whose ancestors are all expanded.
     visible: Vec<NodeId>,
     metrics: Vec<Metrics>,
-    /// Bar length for 100%: the largest inclusive time, or the largest cost without actuals.
+    /// Bar length for 100%: the statement's time, or without actuals what the whole plan costs.
     scale: f64,
+    /// Some step's cost bar spans steps below that cost more than the step counts.
+    cost_below: bool,
     selected: Option<NodeId>,
     detail_open: bool,
     scroll_to_selected: bool,
@@ -91,6 +113,9 @@ pub struct PlanView {
     shown_at: Option<Instant>,
     /// `None` when no step was timed.
     flame: Option<Flame>,
+    /// Plan-wide figures, such as planning time; the detail panel summarizes them when no step is
+    /// selected.
+    facts: Vec<PlanFact>,
 }
 
 impl PlanView {
@@ -104,30 +129,35 @@ impl PlanView {
             visible: Vec::new(),
             metrics: Vec::new(),
             scale: 0.0,
+            cost_below: false,
             selected: None,
             detail_open: true,
             scroll_to_selected: false,
             scroll_id: None,
             shown_at: None,
             flame: None,
+            facts: Vec::new(),
         };
         if let PlanContent::Tree(plan) = &view.content {
             view.collapsed = vec![false; plan.node_count()];
+            let cost_spans = plan.cost_spans();
             view.metrics = plan
                 .nodes()
                 .map(|(id, _)| Metrics {
                     inclusive_ms: plan.inclusive_ms(id),
                     self_ms: plan.self_ms(id),
+                    cost: plan.estimated_cost(id).map(|c| c.total),
+                    cost_span: cost_spans[id.index()],
+                    extras: plan.extras(id),
+                    access: plan.access(id),
                     descendants: plan.descendant_count(id),
                 })
                 .collect();
-            // Normally the root's time; MySQL 8.0.18 can time a materialization above its root.
-            view.scale = if plan.analyzed() {
-                view.metrics.iter().filter_map(|m| m.inclusive_ms).fold(plan.total_ms().unwrap_or(0.0), f64::max)
-            } else {
-                plan.nodes().filter_map(|(_, n)| n.estimate?.cost.map(|c| c.total)).fold(0.0, f64::max)
-            };
+            view.cost_below = view.metrics.iter().any(Metrics::spans_below);
+            view.scale =
+                if plan.analyzed() { plan.total_ms().unwrap_or(0.0) } else { cost_spans[NodeId::ROOT.index()] };
             view.flame = Flame::new(plan);
+            view.facts = plan.facts();
             view.rebuild_visible();
         }
         view
@@ -154,6 +184,7 @@ impl PlanView {
                 let steps = widgets::plural(plan.node_count() as u64, "step");
                 match plan.total_ms() {
                     Some(ms) => format!("{steps} · {}", fmt_ms(ms)),
+                    None if plan.analyzed() => steps,
                     None => format!("{steps} · estimated"),
                 }
             }
@@ -252,16 +283,17 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut PlanView) {
         raw_view(ui, id, view.raw_text());
         return;
     }
-    if view.detail_open
-        && let Some(sel) = view.selected
-    {
+    if view.detail_open && (view.selected.is_some() || !view.facts.is_empty()) {
         let mut open = true;
         egui::Panel::right(id.with("detail"))
             .resizable(true)
             .default_size(300.0)
             .size_range(240.0..=680.0)
             .frame(egui::Frame::new().fill(p.content_bg).stroke(Stroke::new(1.0, p.border)))
-            .show(ui, |ui| detail(ui, view, sel, &mut open));
+            .show(ui, |ui| match view.selected {
+                Some(sel) => detail(ui, view, sel, &mut open),
+                None => plan_summary(ui, view, &mut open),
+            });
         view.detail_open = open;
     }
     egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| match (view.mode, &view.content) {
@@ -317,6 +349,10 @@ fn toolbar(ui: &mut Ui, id: Id, view: &mut PlanView, p: &Palette) {
                 if widgets::icon_button(ui, Icon::Copy, "Copy the server's output").clicked() {
                     ui.ctx().copy_text(view.raw_text().to_string());
                 }
+                if !view.facts.is_empty() && facts_button(ui, &view.facts, p).clicked() {
+                    view.selected = None;
+                    view.detail_open = true;
+                }
             });
         });
     });
@@ -333,6 +369,40 @@ fn text_button(ui: &mut Ui, text: &str) -> egui::Response {
     let color = if resp.hovered() { p.text } else { p.text_muted };
     ui.painter().galley(rect.center() - galley.size() / 2.0, galley, color);
     resp
+}
+
+/// `Planning 0.42 ms · Execution 3.91 ms`, with JIT and trigger time that stands out in the
+/// warning colour. Ordinary figures give way first when the toolbar is narrow. Clicking it shows
+/// the plan's details.
+fn facts_button(ui: &mut Ui, facts: &[PlanFact], p: &Palette) -> egui::Response {
+    let job = |shown: &[&PlanFact]| {
+        let mut job = LayoutJob::default();
+        for (i, fact) in shown.iter().enumerate() {
+            let format =
+                |color: Color32| egui::TextFormat { font_id: theme::ui_font(12.0), color, ..Default::default() };
+            if i > 0 {
+                job.append("·", 7.0, format(p.text_faint));
+            }
+            job.append(fact.kind.label(), if i > 0 { 7.0 } else { 0.0 }, format(p.text_faint));
+            let value = if stands_out(facts, fact) { p.warning } else { p.text_muted };
+            job.append(&fmt_fact(fact.value), 4.0, format(value));
+        }
+        job
+    };
+    let mut shown: Vec<&PlanFact> = facts.iter().collect();
+    let room = ui.available_width() - 24.0;
+    let mut galley = ui.painter().layout_job(job(&shown));
+    while galley.size().x > room && shown.len() > 1 {
+        let drop = shown.iter().rposition(|f| !f.kind.notable()).unwrap_or(shown.len() - 1);
+        shown.remove(drop);
+        galley = ui.painter().layout_job(job(&shown));
+    }
+    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 16.0, 24.0), Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, CornerRadius::same(5), p.hover);
+    }
+    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, p.text_muted);
+    resp.on_hover_text("Show the plan's details")
 }
 
 fn banner(ui: &mut Ui, id: Id, text: &str, dot: Color32, p: &Palette) {
@@ -548,10 +618,28 @@ fn tree(ui: &mut Ui, id: Id, view: &mut PlanView) {
                 chevron(&tp, pos2(x + CHEVRON / 2.0, cy), open, if on_accent { p.accent_text } else { p.text_muted });
             }
 
-            let text_left = x + CHEVRON + 4.0;
+            // The graph's access colour: in the chevron's place on a leaf, before the text otherwise.
+            let mut text_left = x + CHEVRON + 4.0;
+            if let Some(access) = m.access {
+                let center = if plan.children(node_id).is_empty() {
+                    pos2(x + CHEVRON / 2.0, cy)
+                } else {
+                    text_left += 11.0;
+                    pos2(text_left - 7.5, cy)
+                };
+                let swatch = Rect::from_center_size(center, vec2(7.0, 7.0));
+                tp.rect_filled(swatch, CornerRadius::same(2), plan_graph::access_color(access, ui.visuals().dark_mode));
+            }
             let hint = collapsed.then(|| format!("+{}", fmt_count(m.descendants as u64)));
-            let max_w = (metrics_left - text_left - 10.0 - if hint.is_some() { 44.0 } else { 0.0 }).max(20.0);
-            let galley = label(ui, node, max_w, on_accent, p);
+            let badge_color = if on_accent { p.accent_text.gamma_multiply(0.85) } else { p.text_muted };
+            let badges: Vec<Arc<Galley>> = m
+                .extras
+                .iter()
+                .map(|e| ui.painter().layout_no_wrap(e.label().into(), theme::ui_font(10.5), badge_color))
+                .collect();
+            let badges_w: f32 = badges.iter().map(|g| g.size().x + BADGE_PAD + 6.0).sum();
+            let room = metrics_left - text_left - 10.0 - badges_w - if hint.is_some() { 44.0 } else { 0.0 };
+            let galley = label(ui, node, room.max(20.0), on_accent, p);
             let label_w = galley.size().x;
             if galley.elided && hovered_row == Some(r) && hover_x < metrics_left {
                 body.clone().on_hover_ui_at_pointer(|ui| {
@@ -559,11 +647,15 @@ fn tree(ui: &mut Ui, id: Id, view: &mut PlanView) {
                 });
             }
             tp.galley(pos2(text_left, cy - galley.size().y / 2.0), galley, p.text);
+            let mut after = text_left + label_w + 8.0;
+            let badge_border = if on_accent { p.accent_text.gamma_multiply(0.45) } else { p.border };
+            for g in badges {
+                after += extra_badge(&tp, pos2(after, cy), g, badge_color, badge_border) + 6.0;
+            }
             if let Some(hint) = hint {
                 let color = if on_accent { p.accent_text } else { p.text_muted };
                 let g = ui.painter().layout_no_wrap(hint, theme::bold_font(10.5), color);
-                let pill =
-                    Rect::from_min_size(pos2(text_left + label_w + 8.0, cy - 8.0), vec2(g.size().x + 12.0, 16.0));
+                let pill = Rect::from_min_size(pos2(after, cy - 8.0), vec2(g.size().x + 12.0, 16.0));
                 tp.rect_filled(
                     pill,
                     CornerRadius::same(8),
@@ -589,19 +681,25 @@ fn tree(ui: &mut Ui, id: Id, view: &mut PlanView) {
             let number = |left: f32, w: f32, text: &str, color: Color32| {
                 np.text(pos2(left + w - 8.0, cy), Align2::RIGHT_CENTER, text, num_font.clone(), color).width()
             };
+            // A dash where the server printed a placeholder rather than a number.
+            let estimated = |left: f32, w: f32, value: Option<f64>, color: Color32| {
+                if let Some(v) = value {
+                    number(left, w, &fmt_rows(v), color);
+                } else if node.estimate.is_some() {
+                    number(left, w, "–", faint);
+                }
+            };
             let mut cx = metrics_left + PAD;
-            if let Some(est) = node.estimate {
-                number(cx, Columns::EST, &fmt_rows(est.rows), weak);
-            }
+            estimated(cx, Columns::EST, plan.estimated_rows(node_id), weak);
             cx += Columns::EST;
             if analyzed {
                 if let Some(actual) = node.actual {
-                    let misestimated = node.is_misestimated();
+                    let misestimated = plan.is_misestimated(node_id);
                     let text =
                         if actual.loops == 0 { Some("never ran".to_string()) } else { actual.rows.map(fmt_rows) };
                     let color = if misestimated && !on_accent { p.warning } else { strong };
                     let text_w = text.map_or(0.0, |text| number(cx, Columns::ROWS, &text, color));
-                    if misestimated && let Some(ratio) = node.row_estimate_ratio() {
+                    if misestimated && let Some(ratio) = plan.row_estimate_ratio(node_id) {
                         let right = cx + Columns::ROWS - 8.0 - text_w - 5.0;
                         misestimate_badge(
                             &np,
@@ -619,9 +717,7 @@ fn tree(ui: &mut Ui, id: Id, view: &mut PlanView) {
                 }
                 cx += Columns::TIME;
             } else {
-                if let Some(cost) = node.estimate.and_then(|e| e.cost) {
-                    number(cx, Columns::COST, &fmt_rows(cost.total), strong);
-                }
+                estimated(cx, Columns::COST, m.cost, strong);
                 cx += Columns::COST;
             }
             let bar = Rect::from_min_size(pos2(cx + 4.0, cy - BAR_H / 2.0), vec2(cols.bar - 12.0, BAR_H));
@@ -665,7 +761,7 @@ fn tree(ui: &mut Ui, id: Id, view: &mut PlanView) {
             head(cx, Columns::COST, "Cost");
             cx += Columns::COST;
         }
-        bar_legend(&painter, pos2(cx + 4.0, hy), analyzed, p);
+        bar_legend(&painter, pos2(cx + 4.0, hy), analyzed, view.cost_below, p);
     });
     view.scroll_id = Some(output.id);
     view.scroll_to_selected = false;
@@ -763,6 +859,7 @@ fn next_move(view: &PlanView, key: Key, page: usize) -> Option<Move> {
         (Key::Space | Key::Enter, Some(sel)) => Move::Fold(sel, !folded(sel)),
         (Key::Escape, Some(_)) if view.detail_open => Move::CloseDetail,
         (Key::Escape, Some(_)) => Move::Deselect,
+        (Key::Escape, None) if view.detail_open && !view.facts.is_empty() => Move::CloseDetail,
         _ => return None,
     })
 }
@@ -802,6 +899,14 @@ fn label(ui: &Ui, node: &PlanNode, max_w: f32, on_accent: bool, p: &Palette) -> 
     ui.painter().layout_job(job)
 }
 
+/// `temp table`, `filesort`: an outlined tag starting at `left_center`. Returns its width.
+fn extra_badge(painter: &Painter, left_center: Pos2, galley: Arc<Galley>, color: Color32, border: Color32) -> f32 {
+    let rect = Rect::from_min_size(pos2(left_center.x, left_center.y - 7.5), vec2(galley.size().x + BADGE_PAD, 15.0));
+    painter.rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, border), egui::StrokeKind::Inside);
+    painter.galley(rect.center() - galley.size() / 2.0, galley, color);
+    rect.width()
+}
+
 fn chevron(painter: &Painter, center: Pos2, open: f32, color: Color32) {
     let (s, c) = (open * std::f32::consts::FRAC_PI_2).sin_cos();
     let rot = |x: f32, y: f32| center + vec2(x * c - y * s, x * s + y * c);
@@ -838,15 +943,15 @@ fn paint_bar(
     p: &Palette,
 ) {
     let radius = CornerRadius::same((BAR_H / 2.0) as u8);
-    let (track, fill, strong) = if on_accent {
+    let (track, fill, strong, below) = if on_accent {
         let c = p.accent_text;
-        (c.gamma_multiply(0.1), c.gamma_multiply(0.45), c)
+        (c.gamma_multiply(0.1), c.gamma_multiply(0.45), c, c.gamma_multiply(0.22))
     } else if analyzed {
-        (p.plan_bar_track, p.plan_bar, p.plan_bar_self)
+        (p.plan_bar_track, p.plan_bar, p.plan_bar_self, p.plan_bar)
     } else {
-        (p.plan_bar_track, p.plan_cost, p.plan_cost)
+        (p.plan_bar_track, p.plan_cost, p.plan_cost, p.plan_cost_below)
     };
-    let has_value = if analyzed { m.inclusive_ms.is_some() } else { node.estimate.is_some_and(|e| e.cost.is_some()) };
+    let has_value = if analyzed { m.inclusive_ms.is_some() } else { m.cost_span > 0.0 };
     if !has_value || scale <= 0.0 {
         return;
     }
@@ -876,12 +981,15 @@ fn paint_bar(
             let tick = if on_accent { p.accent_text } else { p.plan_tick };
             painter.line_segment([pos2(x, bar.top() - 3.0), pos2(x, bar.bottom() + 3.0)], Stroke::new(1.5, tick));
         }
-    } else if let Some(cost) = node.estimate.and_then(|e| e.cost) {
-        segment(width(cost.total), fill);
+    } else {
+        if m.spans_below() {
+            segment(width(m.cost_span), below);
+        }
+        segment(width(m.cost.unwrap_or(0.0)), fill);
     }
 }
 
-fn bar_legend(painter: &Painter, left_center: Pos2, analyzed: bool, p: &Palette) {
+fn bar_legend(painter: &Painter, left_center: Pos2, analyzed: bool, cost_below: bool, p: &Palette) {
     let font = theme::ui_font(11.0);
     let mut x = left_center.x;
     let mut item = |color: Color32, text: &str| {
@@ -894,7 +1002,10 @@ fn bar_legend(painter: &Painter, left_center: Pos2, analyzed: bool, p: &Palette)
         item(p.plan_bar_self, "self");
         item(p.plan_bar, "total");
     } else {
-        item(p.plan_cost, "relative cost");
+        item(p.plan_cost, "cost");
+        if cost_below {
+            item(p.plan_cost_below, "steps below");
+        }
     }
 }
 
@@ -913,134 +1024,23 @@ fn bar_tooltip(node: &PlanNode, m: &Metrics, scale: f64, analyzed: bool) -> Opti
         }
         Some(tip)
     } else {
-        let cost = node.estimate?.cost?;
-        (scale > 0.0)
-            .then(|| format!("Cost {}, {:.0}% of the costliest step", fmt_rows(cost.total), 100.0 * cost.total / scale))
+        if scale <= 0.0 || m.cost_span <= 0.0 {
+            return None;
+        }
+        let share = |cost: f64| format!("{:.0}% of the plan's cost", 100.0 * cost / scale);
+        Some(match m.cost {
+            Some(cost) if m.spans_below() => format!(
+                "Cost {}\nThe steps below cost {}, which this step doesn't count.\nThe bar spans them: {}",
+                fmt_rows(cost),
+                fmt_rows(m.cost_span),
+                share(m.cost_span)
+            ),
+            Some(cost) => format!("Cost {}, {}", fmt_rows(cost), share(cost)),
+            None => format!(
+                "Not costed by the server\nThe steps below cost {}, {}",
+                fmt_rows(m.cost_span),
+                share(m.cost_span)
+            ),
+        })
     }
-}
-
-fn detail(ui: &mut Ui, view: &PlanView, id: NodeId, open: &mut bool) {
-    let p = palette(ui);
-    let Some(plan) = view.plan() else { return };
-    let node = plan.node(id);
-    let m = &view.metrics[id.index()];
-    egui::ScrollArea::vertical().id_salt(("plan_detail", id)).auto_shrink([false, false]).show(ui, |ui| {
-        egui::Frame::NONE.inner_margin(egui::Margin::symmetric(14, 12)).show(ui, |ui| {
-            egui::Sides::new().shrink_left().show(
-                ui,
-                |ui| {
-                    let title = RichText::new(&node.operation).font(theme::bold_font(14.5)).color(p.text);
-                    ui.add(egui::Label::new(title).wrap());
-                },
-                |ui| {
-                    if widgets::icon_button(ui, Icon::Close, "Close (Esc)").clicked() {
-                        *open = false;
-                    }
-                    if widgets::icon_button(ui, Icon::Copy, "Copy this step").clicked() {
-                        ui.ctx().copy_text(node_text(node));
-                    }
-                },
-            );
-            if let Some(role) = &node.role {
-                ui.label(RichText::new(role).font(theme::ui_font(12.5)).color(p.text_muted));
-            }
-            if let Some(object) = &node.object {
-                let text = match &node.index {
-                    Some(index) => format!("{object}  ·  {index}"),
-                    None => object.clone(),
-                };
-                ui.label(RichText::new(text).font(theme::ui_font(12.5)).color(p.text_muted));
-            }
-            if let Some(condition) = &node.condition {
-                ui.add_space(6.0);
-                egui::Frame::new()
-                    .fill(p.row_alt)
-                    .stroke(Stroke::new(1.0, p.grid_line))
-                    .corner_radius(CornerRadius::same(5))
-                    .inner_margin(egui::Margin::symmetric(8, 6))
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.add(
-                            egui::Label::new(RichText::new(condition).font(theme::mono_font(11.5)).color(p.text))
-                                .wrap(),
-                        );
-                    });
-            }
-
-            let mut facts: Vec<(&str, String, Option<Color32>)> = Vec::new();
-            if let Some(total) = m.inclusive_ms {
-                facts.push(("Time, with steps below", fmt_ms(total), None));
-            }
-            if let Some(own) = m.self_ms {
-                facts.push(("Time in this step", fmt_ms(own), None));
-            }
-            if let Some(actual) = node.actual {
-                if let Some(time) = actual.time {
-                    if let Some(first) = time.first_row_ms {
-                        facts.push(("First row, per loop", fmt_ms(first), None));
-                        facts.push(("Last row, per loop", fmt_ms(time.last_row_ms), None));
-                    } else {
-                        facts.push(("Time per loop", fmt_ms(time.last_row_ms), None));
-                    }
-                }
-                if let Some(rows) = actual.rows {
-                    facts.push(("Rows per loop", fmt_rows(rows), None));
-                }
-                facts.push(("Loops", fmt_count(actual.loops), None));
-                if let Some(rows) = actual.rows.filter(|_| actual.loops > 1) {
-                    facts.push(("Rows in all loops", fmt_rows(rows * actual.loops as f64), None));
-                }
-            }
-            if let Some(est) = node.estimate {
-                facts.push(("Estimated rows per loop", fmt_rows(est.rows), None));
-                if let Some(cost) = est.cost {
-                    let text = match cost.startup {
-                        Some(s) if s != cost.total => {
-                            format!("{} to first row, {} total", fmt_rows(s), fmt_rows(cost.total))
-                        }
-                        _ => fmt_rows(cost.total),
-                    };
-                    facts.push(("Estimated cost", text, None));
-                }
-            }
-            if let Some(ratio) = node.row_estimate_ratio() {
-                let (factor, way) = if ratio >= 1.0 { (ratio, "more") } else { (1.0 / ratio, "fewer") };
-                let text = if factor < 1.05 {
-                    "on target".to_string()
-                } else {
-                    format!("{}× {way} rows than estimated", fmt_factor(factor))
-                };
-                facts.push(("Estimate", text, node.is_misestimated().then_some(p.warning)));
-            }
-            if m.descendants > 0 {
-                facts.push(("Steps below", fmt_count(m.descendants as u64), None));
-            }
-            if !facts.is_empty() {
-                ui.add_space(12.0);
-                widgets::section_title(ui, "Measured and estimated");
-                egui::Grid::new(("plan_facts", id)).num_columns(2).striped(false).spacing([14.0, 6.0]).show(ui, |ui| {
-                    for (k, v, color) in facts {
-                        ui.label(RichText::new(k).size(12.0).color(p.text_muted));
-                        ui.label(RichText::new(v).size(12.5).color(color.unwrap_or(p.text)));
-                        ui.end_row();
-                    }
-                });
-            }
-
-            ui.add_space(12.0);
-            widgets::section_title(ui, "Reported by the server");
-            egui::Grid::new(("plan_attrs", id)).num_columns(2).striped(false).spacing([14.0, 6.0]).show(ui, |ui| {
-                for a in &node.attributes {
-                    ui.label(RichText::new(&a.key).size(12.0).color(p.text_muted));
-                    ui.add(egui::Label::new(RichText::new(&a.value).font(theme::mono_font(11.5)).color(p.text)).wrap());
-                    ui.end_row();
-                }
-            });
-        });
-    });
-}
-
-/// A step as `key: value` lines, for the clipboard.
-pub(crate) fn node_text(node: &PlanNode) -> String {
-    node.attributes.iter().map(|a| format!("{}: {}", a.key, a.value)).collect::<Vec<_>>().join("\n")
 }

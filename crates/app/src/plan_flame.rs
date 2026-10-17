@@ -10,7 +10,7 @@ use eframe::egui::{
     self, Align2, Color32, CornerRadius, EventFilter, FontId, Id, Key, Pos2, Rect, RichText, Sense, Shape, Stroke,
     StrokeKind, Ui, pos2, scroll_area::ScrollSource, text::LayoutJob, vec2,
 };
-use tableplus_core::plan::{NodeId, Plan};
+use tableplus_core::plan::{NodeId, Plan, SPAN_SLACK};
 
 use crate::theme::{self, Palette, palette};
 use crate::widgets::{fmt_count, fmt_ms, fmt_rows};
@@ -23,9 +23,6 @@ const UNTIMED_H: f32 = 14.0;
 const PAD: f32 = 10.0;
 const ZOOM_SECONDS: f32 = 0.38;
 const REVEAL_SECONDS: f32 = 0.3;
-/// Engines print three significant digits, so steps below that add up to a little more than
-/// their parent are rounding; this much more is worth a mark.
-const STRETCH_MARK: f64 = 1.05;
 /// Own time below this share of the statement stays a quiet blue; from it, amber warms to red.
 const NOTABLE_SHARE: f64 = 0.01;
 /// Own time at this share of the statement or more gets the hottest color.
@@ -82,6 +79,8 @@ pub struct Flame {
     bars: Vec<Bar>,
     /// Steps by depth, left to right.
     rows: Vec<Vec<NodeId>>,
+    /// The statement's time, [`Plan::total_ms`], which shares are of. The root bar can span
+    /// more, when steps below report more than any one step covers.
     total_ms: f64,
     camera: Camera,
     /// When the chart was first drawn; its rows unfold from there.
@@ -148,13 +147,9 @@ impl Flame {
         let ids: Vec<NodeId> = plan.nodes().map(|(id, _)| id).collect();
         // Each bar is as wide as the step's time or the steps below it, whichever is more, and a
         // step the server didn't time, such as MySQL's `-> Hash`, is as wide as the steps below.
-        let mut time = vec![0.0; ids.len()];
-        for id in ids.iter().rev() {
-            let below: f64 = plan.children(*id).iter().map(|c| time[c.index()]).sum();
-            time[id.index()] = plan.inclusive_ms(*id).map_or(below, |ms| ms.max(below));
-        }
-        let total_ms = time[NodeId::ROOT.index()];
-        if !plan.analyzed() || total_ms <= 0.0 {
+        let time = plan.spans(|id| plan.inclusive_ms(id));
+        let total_ms = plan.total_ms().unwrap_or(0.0);
+        if !plan.analyzed() || time[NodeId::ROOT.index()] <= 0.0 {
             return None;
         }
         let mut bars: Vec<Bar> =
@@ -174,7 +169,7 @@ impl Flame {
             let bar = &mut bars[id.index()];
             bar.own = own_ms * scale;
             bar.heat = plan.inclusive_ms(id).map(|_| own_ms / total_ms);
-            bar.stretched = plan.inclusive_ms(id).filter(|ms| below > ms * STRETCH_MARK).map(|_| below);
+            bar.stretched = plan.inclusive_ms(id).filter(|ms| below > ms * SPAN_SLACK).map(|_| below);
             let depth = plan.depth(id);
             if rows.len() <= depth {
                 rows.resize_with(depth + 1, Vec::new);
@@ -596,6 +591,17 @@ fn tooltip(ui: &mut Ui, plan: &Plan, id: NodeId, bar: &Bar, total_ms: f64) {
     if !object.is_empty() {
         ui.label(RichText::new(object.join("  ·  ")).size(12.0).color(p.text_muted));
     }
+    if let Some(access) = plan.access(id) {
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(vec2(8.0, 12.0), Sense::hover());
+            let color = crate::plan_graph::access_color(access, ui.visuals().dark_mode);
+            ui.painter().rect_filled(Rect::from_center_size(r.center(), vec2(8.0, 8.0)), CornerRadius::same(2), color);
+            ui.label(RichText::new(access.label()).size(12.0).color(p.text_muted));
+        });
+    }
+    for extra in plan.extras(id) {
+        ui.label(RichText::new(extra.description()).size(12.0).color(p.text_muted));
+    }
     if let Some(condition) = &node.condition {
         ui.add(egui::Label::new(RichText::new(condition).font(theme::mono_font(11.5)).color(p.text_muted)).wrap());
     }
@@ -628,8 +634,10 @@ fn tooltip(ui: &mut Ui, plan: &Plan, id: NodeId, bar: &Bar, total_ms: f64) {
                 fact("Loops", fmt_count(actual.loops));
             }
         }
-        if let Some(est) = node.estimate {
-            fact("Estimated rows", fmt_rows(est.rows));
+        match plan.estimated_rows(id) {
+            Some(rows) => fact("Estimated rows", fmt_rows(rows)),
+            None if node.estimate.is_some() => fact("Estimated rows", "not estimated".into()),
+            None => {}
         }
     });
     let note = |ui: &mut Ui, text: String, color: Color32| {
@@ -926,8 +934,10 @@ mod tests {
         let root = &flame.bars[0];
         assert_eq!(root.stretched, Some(8.0));
         assert!(close(root.own, 0.0));
-        assert!(close(flame.total_ms, 8.0));
-        assert!(close(flame.bars[a.index()].heat.unwrap(), 0.75));
+        // Shares are of the longest step, as in the tree and the summary.
+        assert!(close(flame.total_ms, 6.0));
+        assert!(close(flame.bars[a.index()].heat.unwrap(), 1.0));
+        assert!(close(flame.bars[b.index()].heat.unwrap(), 2.0 / 6.0));
         // A stretched step widens its parent only as far as the parent's own time allows.
         let mut plan = Plan::new(PlanFormat::MySqlTree, timed("join", 10.0, 1), "");
         let x = plan.add_child(NodeId::ROOT, timed("lookup", 1.0, 1));

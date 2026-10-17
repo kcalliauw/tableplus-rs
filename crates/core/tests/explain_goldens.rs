@@ -5,7 +5,7 @@ mod common;
 
 use common::golden::{self, Golden};
 use tableplus_core::Flavor;
-use tableplus_core::plan::{self, NodeId, Plan, PlanFormat};
+use tableplus_core::plan::{self, Access, NodeId, Plan, PlanFormat};
 
 /// The plan's nodes in tree order, walked through the public parent-to-children links.
 fn tree_order(plan: &Plan) -> Vec<NodeId> {
@@ -123,6 +123,112 @@ fn mysql_97_plain_explain_is_an_estimate_tree() {
     assert!(!plan.analyzed());
     assert_eq!(plan.total_ms(), None);
     assert!(plan.nodes().any(|(_, n)| n.estimate.is_some_and(|e| e.cost.is_some())));
+}
+
+#[test]
+fn mysql_97_costs_leave_out_the_union_below_the_limit() {
+    let Some(g) = golden::one("mysql-9.7", "portable", "tree") else { return };
+    let plan = plan::parse(&g.server, g.result.as_ref().unwrap()).expect("a plan").expect("parsed");
+    let find = |op: &str| plan.nodes().find(|(_, n)| n.operation == op).map(|(id, _)| id).unwrap();
+    // `-> Limit: 20 row(s)  (cost=2.85..2.85 rows=0)`
+    assert_eq!(plan.estimated_rows(NodeId::ROOT), None, "rows=0 is MySQL's placeholder");
+    assert_eq!(plan.estimated_cost(NodeId::ROOT).map(|c| c.total), Some(2.85));
+    // `-> Union all materialize  (cost=0..0 rows=0)`
+    let union = find("Union all materialize");
+    assert_eq!((plan.estimated_rows(union), plan.estimated_cost(union)), (None, None));
+    // The branches cost 757 and 31,389, which the limit's own 2.85 leaves out.
+    let spans = plan.cost_spans();
+    assert!(spans[NodeId::ROOT.index()] > 757.0 + 31389.0, "{}", spans[NodeId::ROOT.index()]);
+    assert_eq!(spans[NodeId::ROOT.index()], spans[union.index()]);
+}
+
+#[test]
+fn postgres_12_costs_already_include_the_steps_below() {
+    let Some(g) = golden::one("postgres-12", "portable", "json") else { return };
+    let plan = plan::parse(&g.server, g.result.as_ref().unwrap()).expect("a plan").expect("parsed");
+    let spans = plan.cost_spans();
+    for (id, _) in plan.nodes() {
+        let cost = plan.estimated_cost(id).expect("every PostgreSQL step is costed").total;
+        assert!(spans[id.index()] <= cost * plan::SPAN_SLACK, "{id:?}: {} over {cost}", spans[id.index()]);
+    }
+}
+
+/// `(object, access)` for every step that reads rows, in plan order.
+fn reads(plan: &Plan) -> Vec<(String, Access)> {
+    plan.nodes()
+        .filter_map(|(id, n)| Some((n.object.clone().unwrap_or_else(|| n.operation.clone()), plan.access(id)?)))
+        .collect()
+}
+
+#[test]
+fn full_scans_are_of_real_tables_and_internal_results_have_their_own_class() {
+    let Some(goldens) = golden::load() else { return };
+    let (mut plans, mut internal) = (0, 0);
+    for g in goldens.iter().filter(|g| g.outcome == "ok") {
+        let Some(Ok(plan)) = plan::parse(&g.server, g.result.as_ref().unwrap()) else { continue };
+        plans += 1;
+        for (id, node) in plan.nodes() {
+            let object = node.object.as_deref().unwrap_or("");
+            match plan.access(id) {
+                Some(Access::FullScan) => {
+                    assert!(!object.starts_with('<') && !object.starts_with('('), "{}: {object} is built", g.name);
+                    // JSON version 1 and MariaDB hang subqueries of a table's condition below it.
+                    if matches!(plan.format, PlanFormat::MySqlTree | PlanFormat::MySqlJsonV2) {
+                        assert!(plan.children(id).is_empty(), "{}: a full scan of {object} reads an input", g.name);
+                    }
+                }
+                Some(Access::InternalResult) => internal += 1,
+                _ => {}
+            }
+        }
+    }
+    assert!(plans > 100 && internal > 100, "{plans} plans, {internal} internal results");
+}
+
+#[test]
+fn access_classes_of_the_portable_query_on_each_engine() {
+    use Access::*;
+    let classes = |target: &str, variant: &str| {
+        let g = golden::one(target, "portable", variant)?;
+        Some(reads(&plan::parse(&g.server, g.result.as_ref().unwrap())?.ok()?))
+    };
+    let has = |reads: &[(String, Access)], object: &str, access: Access| {
+        assert!(reads.iter().any(|(o, a)| o == object && *a == access), "{object} as {access:?} in {reads:?}");
+    };
+    if let Some(r) = classes("mysql-8.4", "analyze") {
+        has(&r, "<union temporary>", InternalResult);
+        has(&r, "<subquery4>", InternalResult);
+        has(&r, "c", FullScan);
+        has(&r, "e", UniqueLookup);
+        has(&r, "od", IndexScan);
+    }
+    if let Some(r) = classes("mysql-5.7", "json") {
+        has(&r, "<union1,5>", InternalResult);
+        has(&r, "t", InternalResult);
+        has(&r, "cat", FullScan);
+        has(&r, "s", FullScan);
+        has(&r, "o2", Lookup);
+    }
+    if let Some(r) = classes("mariadb-11.8", "analyze-json") {
+        has(&r, "<union1,5>", InternalResult);
+        has(&r, "<derived3>", Lookup);
+        has(&r, "cat2", FullScan);
+        has(&r, "o", UniqueLookup);
+    }
+    if let Some(r) = classes("postgres-17", "analyze-buffers-json") {
+        assert!(r.iter().any(|(o, a)| o.starts_with("*SELECT* 1") && *a == InternalResult), "{r:?}");
+        has(&r, "orders o", FullScan);
+        assert!(r.iter().any(|(_, a)| *a == Lookup), "{r:?}");
+    }
+    if let Some(g) = golden::one("sqlite-bundled", "modern", "query-plan") {
+        let r = reads(&plan::parse(&g.server, g.result.as_ref().unwrap()).unwrap().unwrap());
+        has(&r, "t", InternalResult);
+        has(&r, "(subquery-7)", InternalResult);
+        has(&r, "chain", InternalResult);
+        has(&r, "employees", FullScan);
+        has(&r, "o", UniqueLookup);
+        has(&r, "e", Lookup);
+    }
 }
 
 #[test]

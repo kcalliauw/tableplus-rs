@@ -129,6 +129,22 @@ reads them into one model (`plan/`), so the views never branch on the engine:
 - Parsers recognize their format from the result's shape, not from which button ran it, so a
   hand-typed `EXPLAIN ANALYZE` gets the plan view too. Formats without a parser fall back to the
   server's raw text.
+- The statement's time is the longest any step reports, not the root's. MySQL 8.0.18 reports
+  48 µs for the limit above a union whose materialization took 12.3 ms. Summing the steps
+  below instead overcounts: a dependent subquery's 4 ms already sits inside the branch that
+  calls it, and the sum came to 18.6 ms. The summary, the tree's bar scale and the flame
+  chart's shares all use this one number.
+- Cost bars in an estimated plan span the steps below a step when those cost more than the
+  step counts. MySQL leaves every temporary table's cost out of the steps that read it, so
+  on the 9.7 union query the limit costs 2.85 while its two branches cost 757 and 31,389. Scaled
+  to the costliest step, nearly every bar was empty, the limit's included. The solid part of
+  a bar stays the server's own number and a paler part covers what the steps below cost, so the
+  top steps fill and every branch keeps its true share. Two other rules were tried. Scaling each
+  step to the top of its own cost region made both union branches full, which hid a 20×
+  difference between them. Bars on table reads alone, scaled to the costliest read, compare a
+  nested loop's per-loop lookup costs with whole scans. A log scale was ruled out earlier
+  because it overstates small branches. PostgreSQL's costs already include the steps below, so
+  its bars don't change.
 
 ## Explain Analyze on SQLite
 

@@ -389,7 +389,7 @@ mod tests {
         let plan = parsed(&result(0, 1000, 0.01, &[(2, 0, "SCAN t", 0, 0, 10.0, 0)]));
         let (id, t) = find(&plan, "SCAN t");
         assert_eq!(t.actual.map(|a| (a.rows, a.loops, a.time)), Some((Some(0.0), 0, None)));
-        assert_eq!(t.row_estimate_ratio(), None);
+        assert_eq!(plan.row_estimate_ratio(id), None);
         assert_eq!(plan.inclusive_ms(id), None);
     }
 

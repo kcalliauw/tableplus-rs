@@ -94,6 +94,9 @@ impl DevScript {
 
     pub fn feed(&mut self, ctx: &egui::Context, input: &mut RawInput, theme: &mut ThemeChoice) {
         ctx.request_repaint();
+        // The window never takes keyboard focus from the person at the machine (see `main`),
+        // and egui drops widget focus in an unfocused window.
+        input.focused = true;
         if self.measuring.is_some() {
             return;
         }

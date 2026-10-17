@@ -65,8 +65,10 @@ pub struct Palette {
     pub plan_bar: Color32,
     pub plan_bar_self: Color32,
     pub plan_bar_track: Color32,
-    /// Bar for estimate-only plans, which show relative cost instead of time.
+    /// Bar for estimate-only plans, which show relative cost instead of time, and its paler
+    /// extension over steps below whose cost the step doesn't count.
     pub plan_cost: Color32,
+    pub plan_cost_below: Color32,
     /// Where the first row came out, on the time bar.
     pub plan_tick: Color32,
     /// Plan tree indent guides, and the guide of the selected step's subtree.
@@ -121,6 +123,7 @@ pub static LIGHT: Palette = Palette {
     plan_bar_self: hex(0x2F7CF6),
     plan_bar_track: hex(0xECEEF2),
     plan_cost: hex(0xA9B6CC),
+    plan_cost_below: hex(0xD3DAE5),
     plan_tick: hex(0x1D1D1F),
     plan_guide: hex(0xE1E3E8),
     plan_guide_active: hex(0x8DB4F6),
@@ -167,6 +170,7 @@ pub static DARK: Palette = Palette {
     plan_bar_self: hex(0x4C95FF),
     plan_bar_track: hex(0x2B2B2E),
     plan_cost: hex(0x56627A),
+    plan_cost_below: hex(0x3F4555),
     plan_tick: hex(0xF2F2F4),
     plan_guide: hex(0x343438),
     plan_guide_active: hex(0x3F69B0),

@@ -9,6 +9,7 @@ pub mod driver;
 pub mod export;
 pub mod fuzzy;
 pub mod model;
+pub mod plan;
 pub mod secrets;
 pub mod server;
 pub mod sqlgen;

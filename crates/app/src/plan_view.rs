@@ -681,13 +681,10 @@ fn tree(ui: &mut Ui, id: Id, view: &mut PlanView) {
             let number = |left: f32, w: f32, text: &str, color: Color32| {
                 np.text(pos2(left + w - 8.0, cy), Align2::RIGHT_CENTER, text, num_font.clone(), color).width()
             };
-            // A dash where the server printed a placeholder rather than a number.
-            let estimated = |left: f32, w: f32, value: Option<f64>, color: Color32| {
-                if let Some(v) = value {
-                    number(left, w, &fmt_rows(v), color);
-                } else if node.estimate.is_some() {
-                    number(left, w, "–", faint);
-                }
+            // A dash wherever the server gave no estimate, whether it printed a placeholder or nothing.
+            let estimated = |left: f32, w: f32, value: Option<f64>, color: Color32| match value {
+                Some(v) => number(left, w, &fmt_rows(v), color),
+                None => number(left, w, "–", faint),
             };
             let mut cx = metrics_left + PAD;
             estimated(cx, Columns::EST, plan.estimated_rows(node_id), weak);

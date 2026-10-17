@@ -271,7 +271,13 @@ pub fn fmt_ms(ms: f64) -> String {
 
 /// `67`, `4,539`: how many times off an estimate is.
 pub fn fmt_factor(f: f64) -> String {
-    if f >= 1000.0 { fmt_count(f.round() as u64) } else { format!("{f:.0}") }
+    if f >= 1000.0 {
+        fmt_count(f.round() as u64)
+    } else if f >= 10.0 {
+        format!("{f:.0}")
+    } else {
+        format!("{f:.1}").trim_end_matches(".0").to_string()
+    }
 }
 
 /// A modal dialog with the app's frame (padding, rounded corners, shadow).
@@ -312,6 +318,8 @@ mod tests {
         assert_eq!(fmt_ms(244e-6), "<1 µs");
         assert_eq!(fmt_ms(1240.0), "1.24 s");
         assert_eq!(fmt_factor(67.2), "67");
+        assert_eq!(fmt_factor(1.18), "1.2");
+        assert_eq!(fmt_factor(3.0), "3");
         assert_eq!(fmt_factor(4539.0), "4,539");
     }
 }

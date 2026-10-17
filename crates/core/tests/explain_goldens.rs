@@ -137,3 +137,101 @@ fn other_output_is_not_read_as_a_tree() {
     }
     assert!(checked > 150, "checked {checked} goldens");
 }
+
+fn sqlite_goldens(variant: &str) -> Vec<Golden> {
+    let Some(goldens) = golden::load() else { return Vec::new() };
+    goldens.into_iter().filter(|g| g.server.flavor == Flavor::Sqlite && g.variant == variant).collect()
+}
+
+#[test]
+fn sqlite_query_plans_follow_their_parent_ids() {
+    let Some(_) = golden::dir() else { return };
+    let goldens = sqlite_goldens("query-plan");
+    assert_eq!(goldens.len(), 3, "portable, modern and dml");
+    for g in goldens {
+        let rs = g.result.as_ref().unwrap();
+        let rows: Vec<(i64, i64, String)> = rs
+            .rows
+            .iter()
+            .map(|r| {
+                (
+                    r[0].to_text().unwrap().parse().unwrap(),
+                    r[1].to_text().unwrap().parse().unwrap(),
+                    r[3].to_text().unwrap(),
+                )
+            })
+            .collect();
+        let plan = plan::parse(&g.server, rs).expect("a plan").unwrap_or_else(|e| panic!("{}: {e}", g.name));
+        assert_eq!(plan.format, PlanFormat::SqliteQueryPlan, "{}", g.name);
+        assert!(!plan.analyzed(), "{}", g.name);
+        let synthetic_root = rows.iter().filter(|r| r.1 == 0).count() > 1;
+        if synthetic_root {
+            assert_eq!(plan.node(NodeId::ROOT).operation, "Query", "{}: a synthetic root", g.name);
+        }
+        assert_eq!(plan.node_count(), rows.len() + synthetic_root as usize, "{}: one node per row", g.name);
+
+        let nodes: Vec<NodeId> = plan.nodes().map(|(id, _)| id).skip(synthetic_root as usize).collect();
+        for (i, (id, parent, detail)) in rows.iter().enumerate() {
+            let at = format!("{}: {id} {detail}", g.name);
+            let node = plan.node(nodes[i]);
+            let expected_parent = match rows.iter().position(|r| r.0 == *parent) {
+                Some(p) => Some(nodes[p]),
+                None => synthetic_root.then_some(NodeId::ROOT),
+            };
+            assert_eq!(plan.parent(nodes[i]), expected_parent, "parent of {at}");
+            assert_eq!(node.attributes[0].value, *detail, "detail of {at}");
+            assert!(node.estimate.is_none() && node.actual.is_none(), "{at}");
+            assert_ne!(&node.operation, detail, "every golden line is a known wording: {at}");
+            for part in [&node.object, &node.index, &node.condition].into_iter().flatten() {
+                assert!(detail.contains(part.as_str()), "{part:?} comes from {at}");
+            }
+            let words: Vec<&str> = detail.split(' ').collect();
+            match words[0] {
+                "SCAN" => {
+                    assert_eq!((node.operation.as_str(), node.object.as_deref()), ("Scan", Some(words[1])), "{at}")
+                }
+                "SEARCH" => {
+                    assert_eq!((node.operation.as_str(), node.object.as_deref()), ("Search", Some(words[1])), "{at}");
+                    assert!(
+                        node.index.is_some() && node.condition.is_some(),
+                        "a search uses an index with a key: {at}"
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+#[test]
+fn sqlite_portable_plan_nests_its_subqueries() {
+    let Some(g) = golden::one("sqlite-bundled", "portable", "query-plan") else { return };
+    let plan = plan::parse(&g.server, g.result.as_ref().unwrap()).expect("a plan").expect("parsed");
+    let find =
+        |op: &str| plan.nodes().find(|(_, n)| n.operation == op).map(|(id, _)| id).unwrap_or_else(|| panic!("{op}"));
+    let merge = find("Merge");
+    assert_eq!(plan.node(merge).condition.as_deref(), Some("UNION ALL"));
+    let arms: Vec<&str> = plan.children(merge).iter().map(|c| plan.node(*c).operation.as_str()).collect();
+    assert_eq!(arms, ["Left", "Right"]);
+    let correlated = find("Correlated scalar subquery 3");
+    let lookups: Vec<(&str, &str)> = plan
+        .children(correlated)
+        .iter()
+        .map(|c| (plan.node(*c).object.as_deref().unwrap(), plan.node(*c).index.as_deref().unwrap()))
+        .collect();
+    assert_eq!(
+        lookups,
+        [
+            ("od2", "COVERING INDEX sqlite_autoindex_order_details_1"),
+            ("p2", "INTEGER PRIMARY KEY"),
+            ("cat2", "INTEGER PRIMARY KEY")
+        ]
+    );
+}
+
+#[test]
+fn sqlite_bytecode_stays_raw_text() {
+    for g in sqlite_goldens("bytecode") {
+        assert!(plan::parse(&g.server, g.result.as_ref().unwrap()).is_none(), "{}", g.name);
+    }
+}

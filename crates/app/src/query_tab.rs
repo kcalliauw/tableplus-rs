@@ -676,12 +676,12 @@ mod tests {
         use tableplus_core::{Flavor, Version};
         let mysql = ServerInfo::new(Flavor::MySql, Version::new(8, 4, 11));
         let job = explain_job(&mysql, "UPDATE products SET price = 0".into(), ExplainMode::Analyze);
-        assert_eq!(explained(&job), Some("EXPLAIN FORMAT=TREE UPDATE products SET price = 0"));
+        assert_eq!(explained(&job), Some("EXPLAIN FORMAT=JSON UPDATE products SET price = 0"));
         assert!(job.note.as_deref().is_some_and(|n| n.contains("UPDATE") && n.contains("estimated plan")));
         assert_eq!(job.sql, "UPDATE products SET price = 0", "history keeps the user's statement");
 
         let job = explain_job(&mysql, "select 1".into(), ExplainMode::Analyze);
-        assert_eq!((explained(&job), job.note.as_deref()), (Some("EXPLAIN ANALYZE select 1"), None));
+        assert_eq!((explained(&job), job.note.as_deref()), (Some("EXPLAIN ANALYZE FORMAT=JSON select 1"), None));
 
         let sqlite = ServerInfo::new(Flavor::Sqlite, Version::new(3, 53, 2));
         let job = explain_job(&sqlite, "select 1".into(), ExplainMode::Analyze);

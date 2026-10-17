@@ -53,8 +53,24 @@ const fn unsupported(flavor: Flavor, mode: ExplainMode, since: Version, reason: 
     Rule { flavor, mode, since, recipe: Recipe::Unsupported(reason) }
 }
 
+/// MySQL's JSON format version 2 for one statement, with the session's own setting put back
+/// afterwards. Version 2 lists the same steps as TREE text but keeps tables, columns, indexes,
+/// lookup and filter conditions and the join algorithm as separate fields, at full precision.
+const fn json_v2(mode: ExplainMode, prefix: &'static str) -> Rule {
+    const SETUP: &[&str] = &["SET @tableplus_explain_json_format = @@SESSION.explain_json_format_version, \
+          explain_json_format_version = 2"];
+    const RESET: &[&str] = &["SET explain_json_format_version = @tableplus_explain_json_format"];
+    Rule {
+        flavor: Flavor::MySql,
+        mode,
+        since: MYSQL_JSON_V2,
+        recipe: Recipe::Wrap { prefix, format: PlanFormat::MySqlJsonV2, setup: SETUP, reset: RESET },
+    }
+}
+
 const ANY: Version = Version::new(0, 0, 0);
 const MYSQL_TREE: Version = Version::new(8, 0, 18);
+const MYSQL_JSON_V2: Version = Version::new(8, 4, 0);
 
 use ExplainMode::{Analyze, Estimate};
 use Flavor::{MariaDb, MySql, Postgres, Sqlite};
@@ -62,8 +78,10 @@ use Flavor::{MariaDb, MySql, Postgres, Sqlite};
 const RULES: &[Rule] = &[
     wrap(MySql, Estimate, ANY, "EXPLAIN FORMAT=JSON ", PlanFormat::MySqlJson),
     wrap(MySql, Estimate, MYSQL_TREE, "EXPLAIN FORMAT=TREE ", PlanFormat::MySqlTree),
+    json_v2(Estimate, "EXPLAIN FORMAT=JSON "),
     unsupported(MySql, Analyze, ANY, "EXPLAIN ANALYZE needs MySQL 8.0.18 or later."),
     wrap(MySql, Analyze, MYSQL_TREE, "EXPLAIN ANALYZE ", PlanFormat::MySqlTree),
+    json_v2(Analyze, "EXPLAIN ANALYZE FORMAT=JSON "),
     wrap(MariaDb, Estimate, ANY, "EXPLAIN FORMAT=JSON ", PlanFormat::MariaDbJson),
     wrap(MariaDb, Analyze, ANY, "ANALYZE FORMAT=JSON ", PlanFormat::MariaDbJson),
     wrap(Postgres, Estimate, ANY, "EXPLAIN (FORMAT JSON) ", PlanFormat::PostgresJson),
@@ -212,6 +230,7 @@ mod tests {
 
     const MYSQL_57: ServerInfo = ServerInfo::new(MySql, Version::new(5, 7, 44));
     const MYSQL_8018: ServerInfo = ServerInfo::new(MySql, Version::new(8, 0, 18));
+    const MYSQL_83: ServerInfo = ServerInfo::new(MySql, Version::new(8, 3, 0));
     const MYSQL_84: ServerInfo = ServerInfo::new(MySql, Version::new(8, 4, 11));
     const MARIADB: ServerInfo = ServerInfo::new(MariaDb, Version::new(11, 4, 13));
     const POSTGRES: ServerInfo = ServerInfo::new(Postgres, Version::new(17, 6, 0));
@@ -227,8 +246,9 @@ mod tests {
         for (server, mode, expected, format) in [
             (MYSQL_57, Estimate, "EXPLAIN FORMAT=JSON select * from orders", PlanFormat::MySqlJson),
             (MYSQL_8018, Estimate, "EXPLAIN FORMAT=TREE select * from orders", PlanFormat::MySqlTree),
-            (MYSQL_84, Estimate, "EXPLAIN FORMAT=TREE select * from orders", PlanFormat::MySqlTree),
+            (MYSQL_83, Estimate, "EXPLAIN FORMAT=TREE select * from orders", PlanFormat::MySqlTree),
             (MYSQL_8018, Analyze, "EXPLAIN ANALYZE select * from orders", PlanFormat::MySqlTree),
+            (MYSQL_83, Analyze, "EXPLAIN ANALYZE select * from orders", PlanFormat::MySqlTree),
             (MARIADB, Estimate, "EXPLAIN FORMAT=JSON select * from orders", PlanFormat::MariaDbJson),
             (MARIADB, Analyze, "ANALYZE FORMAT=JSON select * from orders", PlanFormat::MariaDbJson),
             (POSTGRES, Estimate, "EXPLAIN (FORMAT JSON) select * from orders", PlanFormat::PostgresJson),
@@ -244,6 +264,23 @@ mod tests {
             assert_eq!(r.explain, expected, "{server} {mode:?}");
             assert_eq!(r.format, format, "{server} {mode:?}");
             assert!(r.setup.is_empty() && r.reset.is_empty());
+        }
+    }
+
+    #[test]
+    fn mysql_84_asks_for_json_version_2_and_restores_the_setting() {
+        for (mode, expected) in [
+            (Estimate, "EXPLAIN FORMAT=JSON select * from orders"),
+            (Analyze, "EXPLAIN ANALYZE FORMAT=JSON select * from orders"),
+        ] {
+            for server in [MYSQL_84, ServerInfo::new(MySql, Version::new(9, 7, 2))] {
+                let r = request(&server, "select * from orders", mode).unwrap();
+                assert_eq!((r.explain.as_str(), r.format), (expected, PlanFormat::MySqlJsonV2), "{server} {mode:?}");
+                assert_eq!(r.setup.len(), 1);
+                assert!(r.setup[0].contains("explain_json_format_version = 2"), "{}", r.setup[0]);
+                assert!(r.setup[0].contains("@tableplus_explain_json_format = @@SESSION.explain_json_format_version"));
+                assert_eq!(r.reset, ["SET explain_json_format_version = @tableplus_explain_json_format"]);
+            }
         }
     }
 
@@ -269,7 +306,7 @@ mod tests {
 
     #[test]
     fn strips_the_trailing_semicolon() {
-        assert_eq!(explain(MYSQL_84, "  select 1 ;\n", Estimate).unwrap(), "EXPLAIN FORMAT=TREE select 1");
+        assert_eq!(explain(MYSQL_84, "  select 1 ;\n", Estimate).unwrap(), "EXPLAIN FORMAT=JSON select 1");
     }
 
     #[test]

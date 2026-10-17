@@ -28,6 +28,8 @@ eframe = { version = "0.36", default-features = false, features = [
     "x11",
 ] }
 rfd = "0.17"
+# PNG output for the debug-only dev script's screenshots; already in the tree through eframe.
+png = "0.18"
 dirs = "6"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

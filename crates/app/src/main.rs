@@ -7,6 +7,8 @@
 
 mod app;
 mod conn_dialog;
+#[cfg(debug_assertions)]
+mod dev_script;
 mod editor;
 mod export_dialog;
 mod grid;

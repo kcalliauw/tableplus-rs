@@ -13,7 +13,7 @@ use eframe::egui::{
     self, Align2, Color32, CornerRadius, CursorIcon, EventFilter, Id, Key, Pos2, Rect, Sense, Stroke, StrokeKind, Ui,
     Vec2, pos2, vec2,
 };
-use tableplus_core::plan::{Access, NodeId, Plan};
+use tableplus_core::plan::{Access, NodeId, Plan, SPAN_SLACK};
 
 use crate::icons::{self, Icon};
 use crate::theme::{self, palette};
@@ -53,8 +53,8 @@ struct Step {
     loops: Option<String>,
     /// Time including the steps below, or the estimated cost.
     value: Option<String>,
-    /// Share of the statement's time with and without the steps below, or of the costliest
-    /// step's cost.
+    /// Share of the statement's time with and without the steps below; without actuals, share of
+    /// the plan's cost with the steps below the step doesn't count, and its own.
     bar: Option<(f32, f32)>,
     /// `Estimated 1,616 rows, cost 757`, for the tooltip.
     estimate: Option<String>,
@@ -326,11 +326,8 @@ fn ease_out(t: f32) -> f32 {
 
 fn prepare(plan: &Plan, collapsed: &[bool]) -> Prepared {
     let analyzed = plan.analyzed();
-    let scale = if analyzed {
-        plan.total_ms().unwrap_or(0.0)
-    } else {
-        plan.nodes().filter_map(|(id, _)| plan.estimated_cost(id).map(|c| c.total)).fold(0.0, f64::max)
-    };
+    let cost_spans = plan.cost_spans();
+    let scale = if analyzed { plan.total_ms().unwrap_or(0.0) } else { cost_spans[NodeId::ROOT.index()] };
     let share = |v: f64| if scale > 0.0 { (v / scale).clamp(0.0, 1.0) as f32 } else { 0.0 };
     let steps: Vec<Step> = plan
         .nodes()
@@ -348,7 +345,9 @@ fn prepare(plan: &Plan, collapsed: &[bool]) -> Prepared {
             } else {
                 let rows = plan.estimated_rows(id).map(|rows| format!("≈ {}", rows_text(rows)));
                 let cost = plan.estimated_cost(id);
-                let bar = cost.map(|c| (share(c.total), 0.0));
+                let own = cost.map_or(0.0, |c| c.total);
+                let span = cost_spans[id.index()];
+                let bar = (span > 0.0).then(|| (share(if span > own * SPAN_SLACK { span } else { own }), share(own)));
                 (rows.unwrap_or_default(), None, cost.map(|c| format!("cost {}", fmt_rows(c.total))), bar)
             };
             let estimate_parts: Vec<String> = plan

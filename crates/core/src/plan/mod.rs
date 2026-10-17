@@ -143,6 +143,11 @@ pub struct PlanNode {
 /// Actual rows this many times above or below the estimate count as a misestimate.
 pub const MISESTIMATE_FACTOR: f64 = 10.0;
 
+/// Engines print three significant digits, so steps below that add up to a little more than
+/// the step above them are rounding. A [`Plan::spans`] value this much over the step's own is
+/// worth showing.
+pub const SPAN_SLACK: f64 = 1.05;
+
 impl PlanNode {
     pub fn new(operation: impl Into<String>) -> Self {
         Self {
@@ -296,6 +301,12 @@ impl Plan {
             spans[i] = value(NodeId(i)).map_or(below, |v| v.max(below));
         }
         spans
+    }
+
+    /// [`Plan::spans`] of the estimated cost. The root's is what the whole plan costs, where a
+    /// MySQL plan's own numbers leave out every temporary table below a limit or sort.
+    pub fn cost_spans(&self) -> Vec<f64> {
+        self.spans(|id| self.estimated_cost(id).map(|c| c.total))
     }
 
     fn children_ms(&self, id: NodeId) -> f64 {

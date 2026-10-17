@@ -12,7 +12,7 @@ use eframe::egui::{
 };
 use tableplus_core::ServerInfo;
 use tableplus_core::model::ResultSet;
-use tableplus_core::plan::{self, NodeId, Plan, PlanFormat, PlanNode};
+use tableplus_core::plan::{self, NodeId, Plan, PlanFormat, PlanNode, SPAN_SLACK};
 
 use crate::icons::Icon;
 use crate::plan_flame::{self, Flame, Pick};
@@ -70,7 +70,17 @@ struct Metrics {
     self_ms: Option<f64>,
     /// The planner's total cost, without MySQL's placeholder.
     cost: Option<f64>,
+    /// The cost, or what the steps below cost in all when that is more.
+    cost_span: f64,
     descendants: usize,
+}
+
+impl Metrics {
+    /// The steps below cost more than this step counts, as MySQL's steps above a temporary table
+    /// do, so its bar spans them.
+    fn spans_below(&self) -> bool {
+        self.cost_span > self.cost.unwrap_or(0.0) * SPAN_SLACK
+    }
 }
 
 pub struct PlanView {
@@ -83,8 +93,10 @@ pub struct PlanView {
     /// Rows on screen, top to bottom: the nodes whose ancestors are all expanded.
     visible: Vec<NodeId>,
     metrics: Vec<Metrics>,
-    /// Bar length for 100%: the largest inclusive time, or the largest cost without actuals.
+    /// Bar length for 100%: the statement's time, or without actuals what the whole plan costs.
     scale: f64,
+    /// Some step's cost bar spans steps below that cost more than the step counts.
+    cost_below: bool,
     selected: Option<NodeId>,
     detail_open: bool,
     scroll_to_selected: bool,
@@ -106,6 +118,7 @@ impl PlanView {
             visible: Vec::new(),
             metrics: Vec::new(),
             scale: 0.0,
+            cost_below: false,
             selected: None,
             detail_open: true,
             scroll_to_selected: false,
@@ -115,20 +128,20 @@ impl PlanView {
         };
         if let PlanContent::Tree(plan) = &view.content {
             view.collapsed = vec![false; plan.node_count()];
+            let cost_spans = plan.cost_spans();
             view.metrics = plan
                 .nodes()
                 .map(|(id, _)| Metrics {
                     inclusive_ms: plan.inclusive_ms(id),
                     self_ms: plan.self_ms(id),
                     cost: plan.estimated_cost(id).map(|c| c.total),
+                    cost_span: cost_spans[id.index()],
                     descendants: plan.descendant_count(id),
                 })
                 .collect();
-            view.scale = if plan.analyzed() {
-                plan.total_ms().unwrap_or(0.0)
-            } else {
-                view.metrics.iter().filter_map(|m| m.cost).fold(0.0, f64::max)
-            };
+            view.cost_below = view.metrics.iter().any(Metrics::spans_below);
+            view.scale =
+                if plan.analyzed() { plan.total_ms().unwrap_or(0.0) } else { cost_spans[NodeId::ROOT.index()] };
             view.flame = Flame::new(plan);
             view.rebuild_visible();
         }
@@ -672,7 +685,7 @@ fn tree(ui: &mut Ui, id: Id, view: &mut PlanView) {
             head(cx, Columns::COST, "Cost");
             cx += Columns::COST;
         }
-        bar_legend(&painter, pos2(cx + 4.0, hy), analyzed, p);
+        bar_legend(&painter, pos2(cx + 4.0, hy), analyzed, view.cost_below, p);
     });
     view.scroll_id = Some(output.id);
     view.scroll_to_selected = false;
@@ -845,15 +858,15 @@ fn paint_bar(
     p: &Palette,
 ) {
     let radius = CornerRadius::same((BAR_H / 2.0) as u8);
-    let (track, fill, strong) = if on_accent {
+    let (track, fill, strong, below) = if on_accent {
         let c = p.accent_text;
-        (c.gamma_multiply(0.1), c.gamma_multiply(0.45), c)
+        (c.gamma_multiply(0.1), c.gamma_multiply(0.45), c, c.gamma_multiply(0.22))
     } else if analyzed {
-        (p.plan_bar_track, p.plan_bar, p.plan_bar_self)
+        (p.plan_bar_track, p.plan_bar, p.plan_bar_self, p.plan_bar)
     } else {
-        (p.plan_bar_track, p.plan_cost, p.plan_cost)
+        (p.plan_bar_track, p.plan_cost, p.plan_cost, p.plan_cost_below)
     };
-    let has_value = if analyzed { m.inclusive_ms.is_some() } else { m.cost.is_some() };
+    let has_value = if analyzed { m.inclusive_ms.is_some() } else { m.cost_span > 0.0 };
     if !has_value || scale <= 0.0 {
         return;
     }
@@ -883,12 +896,15 @@ fn paint_bar(
             let tick = if on_accent { p.accent_text } else { p.plan_tick };
             painter.line_segment([pos2(x, bar.top() - 3.0), pos2(x, bar.bottom() + 3.0)], Stroke::new(1.5, tick));
         }
-    } else if let Some(cost) = m.cost {
-        segment(width(cost), fill);
+    } else {
+        if m.spans_below() {
+            segment(width(m.cost_span), below);
+        }
+        segment(width(m.cost.unwrap_or(0.0)), fill);
     }
 }
 
-fn bar_legend(painter: &Painter, left_center: Pos2, analyzed: bool, p: &Palette) {
+fn bar_legend(painter: &Painter, left_center: Pos2, analyzed: bool, cost_below: bool, p: &Palette) {
     let font = theme::ui_font(11.0);
     let mut x = left_center.x;
     let mut item = |color: Color32, text: &str| {
@@ -901,7 +917,10 @@ fn bar_legend(painter: &Painter, left_center: Pos2, analyzed: bool, p: &Palette)
         item(p.plan_bar_self, "self");
         item(p.plan_bar, "total");
     } else {
-        item(p.plan_cost, "relative cost");
+        item(p.plan_cost, "cost");
+        if cost_below {
+            item(p.plan_cost_below, "steps below");
+        }
     }
 }
 
@@ -920,8 +939,24 @@ fn bar_tooltip(node: &PlanNode, m: &Metrics, scale: f64, analyzed: bool) -> Opti
         }
         Some(tip)
     } else {
-        let cost = m.cost?;
-        (scale > 0.0).then(|| format!("Cost {}, {:.0}% of the costliest step", fmt_rows(cost), 100.0 * cost / scale))
+        if scale <= 0.0 || m.cost_span <= 0.0 {
+            return None;
+        }
+        let share = |cost: f64| format!("{:.0}% of the plan's cost", 100.0 * cost / scale);
+        Some(match m.cost {
+            Some(cost) if m.spans_below() => format!(
+                "Cost {}\nThe steps below cost {}, which this step doesn't count.\nThe bar spans them: {}",
+                fmt_rows(cost),
+                fmt_rows(m.cost_span),
+                share(m.cost_span)
+            ),
+            Some(cost) => format!("Cost {}, {}", fmt_rows(cost), share(cost)),
+            None => format!(
+                "Not costed by the server\nThe steps below cost {}, {}",
+                fmt_rows(m.cost_span),
+                share(m.cost_span)
+            ),
+        })
     }
 }
 

@@ -10,7 +10,7 @@ use eframe::egui::{
     self, Align2, Color32, CornerRadius, EventFilter, FontId, Id, Key, Pos2, Rect, RichText, Sense, Shape, Stroke,
     StrokeKind, Ui, pos2, scroll_area::ScrollSource, text::LayoutJob, vec2,
 };
-use tableplus_core::plan::{NodeId, Plan};
+use tableplus_core::plan::{NodeId, Plan, SPAN_SLACK};
 
 use crate::theme::{self, Palette, palette};
 use crate::widgets::{fmt_count, fmt_ms, fmt_rows};
@@ -23,9 +23,6 @@ const UNTIMED_H: f32 = 14.0;
 const PAD: f32 = 10.0;
 const ZOOM_SECONDS: f32 = 0.38;
 const REVEAL_SECONDS: f32 = 0.3;
-/// Engines print three significant digits, so steps below that add up to a little more than
-/// their parent are rounding; this much more is worth a mark.
-const STRETCH_MARK: f64 = 1.05;
 /// Own time below this share of the statement stays a quiet blue; from it, amber warms to red.
 const NOTABLE_SHARE: f64 = 0.01;
 /// Own time at this share of the statement or more gets the hottest color.
@@ -172,7 +169,7 @@ impl Flame {
             let bar = &mut bars[id.index()];
             bar.own = own_ms * scale;
             bar.heat = plan.inclusive_ms(id).map(|_| own_ms / total_ms);
-            bar.stretched = plan.inclusive_ms(id).filter(|ms| below > ms * STRETCH_MARK).map(|_| below);
+            bar.stretched = plan.inclusive_ms(id).filter(|ms| below > ms * SPAN_SLACK).map(|_| below);
             let depth = plan.depth(id);
             if rows.len() <= depth {
                 rows.resize_with(depth + 1, Vec::new);

@@ -212,14 +212,14 @@ pub(super) fn paint_box(f: &Frame, r: Rect, node: &PlanNode, step: &Step, look: 
     }
 
     // Along the bottom: the share of the statement's time with the steps below and in the step
-    // itself, or of the costliest step's cost.
+    // itself, or of the plan's cost below the step and counted by it.
     if let Some((total, own)) = step.bar {
         let track = Rect::from_min_max(
             pos2(r.left() + 14.0 * z, r.bottom() - 9.5 * z),
             pos2(r.right() - 12.0 * z, (r.bottom() - 6.0 * z).max(r.bottom() - 9.5 * z + 1.5)),
         );
         let bar_r = radius(track.height() / 2.0);
-        let (fill, strong) = if f.analyzed { (p.plan_bar, p.plan_bar_self) } else { (p.plan_cost, p.plan_cost) };
+        let (fill, strong) = if f.analyzed { (p.plan_bar, p.plan_bar_self) } else { (p.plan_cost_below, p.plan_cost) };
         painter.rect_filled(track, bar_r, fade(p.plan_bar_track));
         for (share, color) in [(total, fill), (own.min(total), strong)] {
             if share > 0.0 {

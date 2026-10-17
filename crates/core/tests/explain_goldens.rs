@@ -126,6 +126,34 @@ fn mysql_97_plain_explain_is_an_estimate_tree() {
 }
 
 #[test]
+fn mysql_97_costs_leave_out_the_union_below_the_limit() {
+    let Some(g) = golden::one("mysql-9.7", "portable", "tree") else { return };
+    let plan = plan::parse(&g.server, g.result.as_ref().unwrap()).expect("a plan").expect("parsed");
+    let find = |op: &str| plan.nodes().find(|(_, n)| n.operation == op).map(|(id, _)| id).unwrap();
+    // `-> Limit: 20 row(s)  (cost=2.85..2.85 rows=0)`
+    assert_eq!(plan.estimated_rows(NodeId::ROOT), None, "rows=0 is MySQL's placeholder");
+    assert_eq!(plan.estimated_cost(NodeId::ROOT).map(|c| c.total), Some(2.85));
+    // `-> Union all materialize  (cost=0..0 rows=0)`
+    let union = find("Union all materialize");
+    assert_eq!((plan.estimated_rows(union), plan.estimated_cost(union)), (None, None));
+    // The branches cost 757 and 31,389, which the limit's own 2.85 leaves out.
+    let spans = plan.cost_spans();
+    assert!(spans[NodeId::ROOT.index()] > 757.0 + 31389.0, "{}", spans[NodeId::ROOT.index()]);
+    assert_eq!(spans[NodeId::ROOT.index()], spans[union.index()]);
+}
+
+#[test]
+fn postgres_12_costs_already_include_the_steps_below() {
+    let Some(g) = golden::one("postgres-12", "portable", "json") else { return };
+    let plan = plan::parse(&g.server, g.result.as_ref().unwrap()).expect("a plan").expect("parsed");
+    let spans = plan.cost_spans();
+    for (id, _) in plan.nodes() {
+        let cost = plan.estimated_cost(id).expect("every PostgreSQL step is costed").total;
+        assert!(spans[id.index()] <= cost * plan::SPAN_SLACK, "{id:?}: {} over {cost}", spans[id.index()]);
+    }
+}
+
+#[test]
 fn other_output_is_not_read_as_a_tree() {
     let Some(goldens) = golden::load() else { return };
     let mut checked = 0;

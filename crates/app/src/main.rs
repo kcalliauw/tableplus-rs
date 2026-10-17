@@ -68,6 +68,18 @@ fn main() -> eframe::Result {
     }
 
     let mut options = eframe::NativeOptions { viewport, renderer, centered: true, ..Default::default() };
+    // A scripted run feeds its input straight into egui, so it leaves keyboard focus with
+    // whatever the person at the machine is using.
+    #[cfg(all(debug_assertions, target_os = "macos"))]
+    if std::env::var_os("TABLEPLUS_DEV_SCRIPT").is_some() {
+        use winit::platform::macos::EventLoopBuilderExtMacOS;
+        // Floating, or the window of an app that isn't active stays behind and isn't painted.
+        options.viewport =
+            options.viewport.with_active(false).with_window_level(eframe::egui::WindowLevel::AlwaysOnTop);
+        options.event_loop_builder = Some(Box::new(|builder| {
+            builder.with_activate_ignoring_other_apps(false);
+        }));
+    }
     if std::env::var_os("TABLEPLUS_RS_HOME").is_some() {
         options.persistence_path = Some(tableplus_core::store::config_dir().join("app.ron"));
     }

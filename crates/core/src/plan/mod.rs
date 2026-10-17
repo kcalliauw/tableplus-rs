@@ -6,9 +6,11 @@
 //! for display. MySQL TREE text, MySQL and MariaDB JSON, PostgreSQL JSON and SQLite's
 //! `EXPLAIN QUERY PLAN` rows all fit it; only MySQL TREE has a parser so far.
 
+mod access;
 mod mysql_tree;
 mod request;
 
+pub use access::Access;
 pub use request::{ExplainMode, ExplainStatements, Unsupported, request};
 
 use crate::model::ResultSet;

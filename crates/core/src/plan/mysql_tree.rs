@@ -165,7 +165,7 @@ const OBJECT_PREFIXES: &[&str] =
     &["Materialize recursive CTE ", "Materialize CTE ", "Update ", "Delete from ", "Insert into "];
 
 /// Splits a line's text into operation, object, index and condition.
-fn describe(head: &str) -> PlanNode {
+pub(super) fn describe(head: &str) -> PlanNode {
     // `Filter: (a = 1)`, `Sort: x DESC`, `Limit: 20 row(s)`, `Group aggregate: count(…)`
     if let Some((op, rest)) = head.split_once(": ")
         && is_label(op)

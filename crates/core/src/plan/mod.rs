@@ -4,8 +4,9 @@
 //! The model keeps what the engines report in common. A node has an operation, the object it
 //! reads, a condition, the planner's estimate and the measured actuals, plus every raw attribute
 //! for display. MySQL TREE text, MySQL and MariaDB JSON, PostgreSQL JSON and SQLite's
-//! `EXPLAIN QUERY PLAN` rows all fit it; only MySQL TREE has a parser so far.
+//! `EXPLAIN QUERY PLAN` rows all fit it.
 
+mod mysql_json;
 mod mysql_tree;
 mod request;
 
@@ -34,6 +35,9 @@ pub enum PlanFormat {
     MySqlTree,
     /// MySQL `EXPLAIN FORMAT=JSON`, version 1.
     MySqlJson,
+    /// MySQL `EXPLAIN [ANALYZE] FORMAT=JSON` with `explain_json_format_version = 2`, the 9.x
+    /// default.
+    MySqlJsonV2,
     /// MariaDB `EXPLAIN FORMAT=JSON` and `ANALYZE FORMAT=JSON`.
     MariaDbJson,
     /// PostgreSQL `EXPLAIN (FORMAT JSON)`, with or without ANALYZE.
@@ -47,6 +51,7 @@ impl PlanFormat {
         match self {
             PlanFormat::MySqlTree => "MySQL tree",
             PlanFormat::MySqlJson => "MySQL JSON",
+            PlanFormat::MySqlJsonV2 => "MySQL JSON version 2",
             PlanFormat::MariaDbJson => "MariaDB JSON",
             PlanFormat::PostgresJson => "PostgreSQL JSON",
             PlanFormat::SqliteQueryPlan => "SQLite query plan",
@@ -112,6 +117,9 @@ pub struct PlanNode {
     pub object: Option<String>,
     /// The index it uses.
     pub index: Option<String>,
+    /// How the engine reaches the rows, in its own words: `ALL`, `ref` or `eq_ref` in MySQL's
+    /// JSON version 1, `table`, `index` or `join` in version 2.
+    pub access_type: Option<String>,
     /// Join, filter, sort or lookup condition, as the engine prints it.
     pub condition: Option<String>,
     pub estimate: Option<Estimate>,
@@ -132,6 +140,7 @@ impl PlanNode {
             operation: operation.into(),
             object: None,
             index: None,
+            access_type: None,
             condition: None,
             estimate: None,
             actual: None,
@@ -259,7 +268,7 @@ pub struct ParseError {
 type Parser = fn(&ServerInfo, &ResultSet) -> Option<Result<Plan, ParseError>>;
 
 /// Every format reader. Each recognizes its own result shape and returns `None` for others.
-const PARSERS: &[Parser] = &[mysql_tree::parse];
+const PARSERS: &[Parser] = &[mysql_tree::parse, mysql_json::parse_v1, mysql_json::parse_v2];
 
 /// Reads a statement's result as a query plan. `None` when the result isn't a plan in a format
 /// with a parser; the caller then shows it as rows or as [`raw_text`].

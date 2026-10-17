@@ -137,3 +137,218 @@ fn other_output_is_not_read_as_a_tree() {
     }
     assert!(checked > 150, "checked {checked} goldens");
 }
+
+type Json = serde_json::Map<String, serde_json::Value>;
+
+fn json(g: &Golden) -> Json {
+    serde_json::from_str(&g.text().unwrap_or_else(|| panic!("{}: one text cell", g.name)))
+        .unwrap_or_else(|e| panic!("{}: {e}", g.name))
+}
+
+fn is_json_v1(g: &Golden) -> bool {
+    g.server.flavor == Flavor::MySql && g.outcome == "ok" && g.variant == "json" && g.target != "mysql-9.7"
+}
+
+fn is_json_v2(g: &Golden) -> bool {
+    g.server.flavor == Flavor::MySql
+        && g.outcome == "ok"
+        && (g.variant.ends_with("json-v2") || (g.target == "mysql-9.7" && g.variant.ends_with("json")))
+}
+
+/// A version 1 table as the JSON states it: name, access type, key, condition, whether it has
+/// rows and costs, and how many query blocks enclose it.
+#[derive(Debug, PartialEq)]
+struct V1Table {
+    name: Option<String>,
+    access: Option<String>,
+    key: Option<String>,
+    condition: Option<String>,
+    rows: bool,
+    cost: bool,
+    blocks: usize,
+}
+
+/// Every object with a `table_name` in document order, and the number of query blocks.
+fn v1_tables(value: &serde_json::Value, blocks: usize, tables: &mut Vec<V1Table>, block_count: &mut usize) {
+    match value {
+        serde_json::Value::Object(obj) => {
+            let s = |k: &str| obj.get(k).and_then(|v| v.as_str()).map(str::to_string);
+            if obj.contains_key("table_name") {
+                let has_rows = obj.contains_key("rows_examined_per_scan") || obj.contains_key("rows");
+                tables.push(V1Table {
+                    name: s("table_name"),
+                    access: s("access_type"),
+                    key: s("key"),
+                    condition: s("attached_condition"),
+                    rows: has_rows && !obj.contains_key("query_specifications"),
+                    cost: has_rows && obj.contains_key("cost_info"),
+                    blocks,
+                });
+            }
+            for (k, v) in obj {
+                let inner = if k == "query_block" {
+                    *block_count += 1;
+                    blocks + 1
+                } else {
+                    blocks
+                };
+                v1_tables(v, inner, tables, block_count);
+            }
+        }
+        serde_json::Value::Array(items) => items.iter().for_each(|v| v1_tables(v, blocks, tables, block_count)),
+        _ => {}
+    }
+}
+
+fn is_block(node: &tableplus_core::plan::PlanNode) -> bool {
+    node.operation.starts_with("Select #") || node.operation == "Query"
+}
+
+#[test]
+fn mysql_json_v1_goldens_keep_every_table_and_block() {
+    let Some(goldens) = golden::load() else { return };
+    let v1: Vec<&Golden> = goldens.iter().filter(|g| is_json_v1(g)).collect();
+    assert!(v1.len() >= 13, "expected the JSON goldens of MySQL 5.6 to 8.4, found {}", v1.len());
+    for g in v1 {
+        let doc = serde_json::Value::Object(json(g));
+        let (mut expected, mut blocks) = (Vec::new(), 0);
+        v1_tables(&doc, 0, &mut expected, &mut blocks);
+        let plan = plan::parse(&g.server, g.result.as_ref().unwrap())
+            .expect("a plan")
+            .unwrap_or_else(|e| panic!("{}: {e}", g.name));
+        assert_eq!(plan.format, PlanFormat::MySqlJson, "{}", g.name);
+        assert_eq!(plan.raw, g.text().unwrap(), "{}: raw text is the server's output", g.name);
+        assert!(!plan.analyzed(), "{}: version 1 has no actuals", g.name);
+        let order = tree_order(&plan);
+        let actual: Vec<V1Table> = order
+            .iter()
+            .filter(|id| plan.node(**id).object.is_some())
+            .map(|id| {
+                let n = plan.node(*id);
+                let mut up = plan.parent(*id);
+                let mut enclosing = 0;
+                while let Some(p) = up {
+                    enclosing += usize::from(is_block(plan.node(p)));
+                    up = plan.parent(p);
+                }
+                V1Table {
+                    name: n.object.clone(),
+                    access: n.access_type.clone(),
+                    key: n.index.clone(),
+                    condition: n.condition.clone(),
+                    rows: n.estimate.is_some(),
+                    cost: n.estimate.is_some_and(|e| e.cost.is_some()),
+                    blocks: enclosing,
+                }
+            })
+            .collect();
+        assert_eq!(actual, expected, "{}: tables in document order", g.name);
+        assert_eq!(plan.nodes().filter(|(_, n)| is_block(n)).count(), blocks, "{}: one node per query block", g.name);
+        let costed = expected.iter().any(|t| t.cost);
+        assert_eq!(costed, g.target != "mysql-5.6", "{}: costs from 5.7 on", g.name);
+    }
+}
+
+/// A version 2 step as the JSON states it, with its depth below the top step.
+#[derive(Debug)]
+struct V2Step {
+    depth: usize,
+    operation: String,
+    access: Option<String>,
+    estimate: bool,
+    actual: bool,
+}
+
+/// Steps in document order through every list of steps, a heading taking a level of its own.
+fn v2_steps(step: &Json, depth: usize, out: &mut Vec<V2Step>) {
+    let heading = step.get("heading").and_then(|h| h.as_str());
+    if let Some(h) = heading {
+        out.push(V2Step { depth, operation: h.to_string(), access: None, estimate: false, actual: false });
+    }
+    let depth = depth + usize::from(heading.is_some());
+    out.push(V2Step {
+        depth,
+        operation: step["operation"].as_str().unwrap().to_string(),
+        access: step.get("access_type").and_then(|a| a.as_str()).map(str::to_string),
+        estimate: step.contains_key("estimated_rows"),
+        actual: step.contains_key("actual_loops"),
+    });
+    for list in step.values().filter_map(|v| v.as_array()) {
+        for child in list.iter().filter_map(|v| v.as_object()).filter(|o| o.contains_key("operation")) {
+            v2_steps(child, depth + 1, out);
+        }
+    }
+}
+
+#[test]
+fn mysql_json_v2_goldens_keep_every_step() {
+    let Some(goldens) = golden::load() else { return };
+    let v2: Vec<&Golden> = goldens.iter().filter(|g| is_json_v2(g)).collect();
+    assert!(v2.len() >= 15, "expected the version 2 goldens of MySQL 8.4 and 9.7, found {}", v2.len());
+    for g in v2 {
+        let doc = json(g);
+        let top = doc.get("query_plan").and_then(|v| v.as_object()).unwrap_or(&doc);
+        let mut expected = Vec::new();
+        v2_steps(top, 0, &mut expected);
+        let plan = plan::parse(&g.server, g.result.as_ref().unwrap())
+            .expect("a plan")
+            .unwrap_or_else(|e| panic!("{}: {e}", g.name));
+        assert_eq!(plan.format, PlanFormat::MySqlJsonV2, "{}", g.name);
+        assert_eq!(plan.raw, g.text().unwrap(), "{}", g.name);
+        assert_eq!(plan.analyzed(), g.variant.starts_with("analyze"), "{}", g.name);
+        let order = tree_order(&plan);
+        assert_eq!(order.len(), expected.len(), "{}: one node per step and heading", g.name);
+        for (id, step) in order.iter().zip(&expected) {
+            let node = plan.node(*id);
+            let at = format!("{}: {}", g.name, step.operation);
+            assert_eq!(plan.depth(*id), step.depth, "depth of {at}");
+            assert!(step.operation.starts_with(node.operation.as_str()), "operation {:?} of {at}", node.operation);
+            for part in [&node.object, &node.index, &node.condition].into_iter().flatten() {
+                assert!(step.operation.contains(part.as_str()), "{part:?} comes from {at}");
+            }
+            assert_eq!(node.estimate.is_some(), step.estimate, "estimate of {at}");
+            assert_eq!(node.actual.is_some(), step.actual, "actuals of {at}");
+            assert_eq!(node.access_type, step.access, "access type of {at}");
+        }
+    }
+}
+
+/// Version 2 lists the same steps as TREE text, in the same order. Only a select-list subquery
+/// sits one level deeper: under the step that produces the select list, where TREE prints it
+/// beside that step.
+#[test]
+fn mysql_json_v2_has_the_tree_formats_steps() {
+    let mut compared = 0;
+    for target in ["mysql-8.4", "mysql-9.7"] {
+        for query in ["portable", "modern", "dml"] {
+            for (tree, json) in [("tree", "json-v2"), ("analyze", "analyze-json-v2")] {
+                let (Some(tree), Some(json)) = (golden::one(target, query, tree), golden::one(target, query, json))
+                else {
+                    return;
+                };
+                if tree.outcome != "ok" || json.outcome != "ok" {
+                    continue;
+                }
+                let steps = |g: &Golden| {
+                    let plan = plan::parse(&g.server, g.result.as_ref().unwrap()).unwrap().unwrap();
+                    let in_projection = |id: NodeId| {
+                        std::iter::successors(Some(id), |i| plan.parent(*i)).any(|i| {
+                            plan.node(i).condition.as_deref().is_some_and(|c| c.starts_with("subquery in projection"))
+                        })
+                    };
+                    tree_order(&plan)
+                        .into_iter()
+                        .map(|id| {
+                            let n = plan.node(id);
+                            let depth = plan.depth(id) - usize::from(g.variant.contains("json") && in_projection(id));
+                            (depth, n.operation.clone(), n.object.clone(), n.index.clone())
+                        })
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(steps(&json), steps(&tree), "{target}/{query}: {} and {}", json.variant, tree.variant);
+                compared += 1;
+            }
+        }
+    }
+    assert!(compared >= 8, "compared {compared} pairs");
+}

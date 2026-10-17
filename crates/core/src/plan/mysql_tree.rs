@@ -8,7 +8,9 @@
 //!         -> Covering index lookup on od2 using idx_product (product_id=p2.product_id)  (cost=0.546 rows=28)
 //! ```
 
-use super::{Actual, ActualTime, Attribute, Cost, Estimate, NodeId, ParseError, Plan, PlanFormat, PlanNode};
+use super::{
+    Actual, ActualTime, Attribute, Cost, Estimate, NodeId, ParseError, Plan, PlanFormat, PlanNode, strip_outer_parens,
+};
 use crate::model::ResultSet;
 use crate::server::{Flavor, ServerInfo};
 use crate::value::Value;
@@ -224,25 +226,6 @@ fn take_name(text: &str) -> (&str, &str) {
     }
     .unwrap_or_else(|| text.find([' ', '(']).unwrap_or(text.len()));
     (&text[..end], &text[end..])
-}
-
-/// `(a = b)` → `a = b`, but `(a = b), (c = d)` stays as it is.
-fn strip_outer_parens(text: &str) -> &str {
-    if !(text.starts_with('(') && text.ends_with(')')) {
-        return text;
-    }
-    let mut depth = 0;
-    for (i, c) in text.char_indices() {
-        match c {
-            '(' => depth += 1,
-            ')' => depth -= 1,
-            _ => {}
-        }
-        if depth == 0 && i < text.len() - 1 {
-            return text;
-        }
-    }
-    &text[1..text.len() - 1]
 }
 
 #[cfg(test)]

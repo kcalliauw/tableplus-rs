@@ -267,6 +267,25 @@ pub fn parse(server: &ServerInfo, result: &ResultSet) -> Option<Result<Plan, Par
     PARSERS.iter().find_map(|parser| parser(server, result))
 }
 
+/// `(a = b)` → `a = b`, but `(a = b), (c = d)` stays as it is.
+fn strip_outer_parens(text: &str) -> &str {
+    if !(text.starts_with('(') && text.ends_with(')')) {
+        return text;
+    }
+    let mut depth = 0;
+    for (i, c) in text.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 && i < text.len() - 1 {
+            return text;
+        }
+    }
+    &text[1..text.len() - 1]
+}
+
 /// A result as plain text: the values of a one-column result line by line, otherwise aligned
 /// columns under a header.
 pub fn raw_text(result: &ResultSet) -> String {

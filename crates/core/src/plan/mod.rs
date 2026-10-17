@@ -144,9 +144,13 @@ impl PlanNode {
 
     /// Actual rows divided by estimated rows, per loop. Both count as at least one row, so a
     /// guess of 0.3 rows that turns out to be 0.03 is not a misestimate. `None` without both
-    /// numbers or when the node never ran.
+    /// numbers, when the node never ran, or for an estimate of exactly zero, which MySQL prints
+    /// for steps it doesn't estimate (temporary tables, and the sort and limit above them).
     pub fn row_estimate_ratio(&self) -> Option<f64> {
         let estimated = self.estimate?.rows;
+        if estimated == 0.0 {
+            return None;
+        }
         let actual = self.actual.filter(|a| a.loops > 0)?.rows;
         Some(actual.max(1.0) / estimated.max(1.0))
     }
@@ -380,8 +384,9 @@ mod tests {
         assert!(with(10.0, 100.0, 1).is_misestimated());
         assert!(with(1000.0, 99.0, 1).is_misestimated());
         assert!(!with(1000.0, 101.0, 1).is_misestimated());
-        // MySQL's `rows=0` guesses against 67 real rows.
-        assert_eq!(with(0.0, 67.0, 1).row_estimate_ratio(), Some(67.0));
+        // MySQL's `rows=0` on a union's temporary table means no estimate.
+        assert_eq!(with(0.0, 67.0, 1).row_estimate_ratio(), None);
+        assert_eq!(with(0.5, 67.0, 1).row_estimate_ratio(), Some(67.0));
         // Fractions of a row are not a misestimate.
         assert!(!with(0.333, 0.01, 1083).is_misestimated());
         assert_eq!(with(5.0, 0.0, 0).row_estimate_ratio(), None);

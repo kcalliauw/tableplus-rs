@@ -103,6 +103,7 @@ pub fn request(server: &ServerInfo, sql: &str, mode: ExplainMode) -> Result<Expl
 /// The leading keywords of a statement: its main verb, the verbs of its WITH clauses, and
 /// whether a SELECT writes `INTO` a table, file or variable.
 struct StatementShape {
+    /// The first keyword in capitals, or empty when the statement starts with something else.
     verb: String,
     cte_verbs: Vec<String>,
     select_into: bool,
@@ -165,7 +166,12 @@ impl StatementShape {
             }
             i = skip_parens(i);
         }
-        let verb = if word(i) == "DESC" { "DESCRIBE".to_string() } else { word(i) };
+        let keyword = tokens.get(i).is_some_and(|t| t.kind == TokenKind::Keyword);
+        let verb = match word(i) {
+            _ if !keyword => String::new(),
+            w if w == "DESC" => "DESCRIBE".to_string(),
+            w => w,
+        };
         let mut depth = 0usize;
         let select_into = verb == "SELECT"
             && tokens[i..].iter().any(|t| match (t.kind, t.text(sql)) {
@@ -283,6 +289,7 @@ mod tests {
             (POSTGRES, "select * into new_table from t", "SELECT … INTO"),
             (POSTGRES, "create table t as select 1", "CREATE"),
             (MARIADB, "call refresh_stats()", "CALL"),
+            (MYSQL_84, "s.country, count(distinct od.order_id)", "statement"),
         ] {
             let err = explain(server, sql, Analyze).unwrap_err();
             assert!(err.contains(verb), "{sql}: {err}");

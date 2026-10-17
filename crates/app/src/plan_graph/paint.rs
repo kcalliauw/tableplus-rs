@@ -10,7 +10,7 @@ use eframe::egui::{
 use tableplus_core::plan::{Access, NodeId, PlanNode};
 
 use super::layout::ROW_GAP;
-use super::{Camera, DIAMOND_R, DIAMOND_Y, Prepared, Step, cap_rect, rows_text};
+use super::{Camera, DIAMOND_R, DIAMOND_Y, Prepared, Step, access_color, cap_rect, rows_text};
 use crate::theme::{self, Palette, palette};
 use crate::widgets::{fmt_count, fmt_factor, fmt_rows};
 
@@ -27,20 +27,6 @@ fn legend_label(access: Access) -> &'static str {
         Access::Lookup | Access::UniqueLookup => "Key lookup",
         Access::Constant => "Constant",
     }
-}
-
-/// Workbench's colours: red for a full table scan, red-orange for a full index scan, orange for a
-/// range, green for key lookups and blue for a constant row.
-pub(crate) fn access_color(access: Access, dark: bool) -> Color32 {
-    let (light, night) = match access {
-        Access::FullScan => (0xE5484D, 0xFF6369),
-        Access::IndexScan => (0xEC6A2C, 0xFF8A4D),
-        Access::Range => (0xE59A00, 0xFFBA3B),
-        Access::Lookup | Access::UniqueLookup => (0x2E9E5B, 0x3DD68C),
-        Access::Constant => (0x1B9BD8, 0x55C3F7),
-    };
-    let rgb: u32 = if dark { night } else { light };
-    Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
 }
 
 /// The canvas and box surfaces, which the palette has no names for.

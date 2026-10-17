@@ -103,6 +103,7 @@ const STEPS: &[(&str, &str, Tail)] = &[
     ("MATERIALIZE ", "Materialize", Tail::Object),
     ("CO-ROUTINE ", "Co-routine", Tail::Object),
     ("BLOOM FILTER ON ", "Bloom filter", Tail::Object),
+    ("CREATE AUTOMATIC INDEX ON ", "Create automatic index", Tail::Object),
     ("CREATE BLOOM FILTER", "Create bloom filter", Tail::None),
     ("COMPOUND QUERY", "Compound query", Tail::None),
     ("LEFT-MOST SUBQUERY", "Left-most subquery", Tail::None),
@@ -194,10 +195,10 @@ fn access(operation: &str, text: &str) -> PlanNode {
     node
 }
 
-/// A name up to the first space, or a parenthesized one such as `(subquery-6)`.
+/// A name up to the first space or parenthesis, or a parenthesized one such as `(subquery-6)`.
 fn take_name(text: &str) -> (&str, &str) {
     let end = if text.starts_with('(') { text.find(')').map(|i| i + 1) } else { None }
-        .unwrap_or_else(|| text.find(' ').unwrap_or(text.len()));
+        .unwrap_or_else(|| text.find([' ', '(']).unwrap_or(text.len()));
     (&text[..end], text[end..].trim())
 }
 
@@ -285,6 +286,10 @@ mod tests {
             ("INDEX 1", ("Index 1", None, None, None)),
             ("BLOOM FILTER ON e (reports_to=?)", ("Bloom filter", Some("e"), None, Some("reports_to=?"))),
             ("CREATE BLOOM FILTER", ("Create bloom filter", None, None, None)),
+            (
+                "CREATE AUTOMATIC INDEX ON tree(id, depth)",
+                ("Create automatic index", Some("tree"), None, Some("id, depth")),
+            ),
             ("SETUP", ("Setup", None, None, None)),
             ("RECURSIVE STEP", ("Recursive step", None, None, None)),
             ("SOMETHING NEWER", ("SOMETHING NEWER", None, None, None)),

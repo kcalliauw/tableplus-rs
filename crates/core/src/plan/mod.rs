@@ -17,6 +17,7 @@ mod sqlite_scanstatus;
 
 pub use access::Access;
 pub use request::{ExplainMode, ExplainStatements, Unsupported, request};
+pub(crate) use sqlite_scanstatus::{COLUMNS as SQLITE_SCAN_STATUS_COLUMNS, STATEMENT_ID as SQLITE_STATEMENT_ID};
 
 use crate::model::ResultSet;
 use crate::server::ServerInfo;

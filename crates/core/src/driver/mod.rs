@@ -4,12 +4,12 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use async_trait::async_trait;
 
 use crate::config::{ConnectionConfig, Credentials, DriverKind};
 use crate::dialect::Dialect;
-use crate::model::{ColumnMeta, QueryOutput, Row, SchemaObject, StatementResult, TableStructure};
+use crate::model::{ColumnMeta, QueryOutput, ResultSet, Row, SchemaObject, StatementResult, TableStructure};
 use crate::server::ServerInfo;
 
 /// Receives rows in batches from [`Connection::query_batches`].
@@ -47,6 +47,12 @@ pub trait Connection: Send + Sync {
     /// Runs all statements in one transaction (rolled back on the first error) and returns
     /// the total number of affected rows.
     async fn execute_in_transaction(&self, statements: &[String]) -> Result<u64>;
+    /// Runs `sql` to its last row and returns what the database measured for each step of its
+    /// plan, for databases that measure through their client API rather than an EXPLAIN
+    /// statement. Only SQLite does; [`crate::plan::request`] says when to call this.
+    async fn measure(&self, _sql: &str) -> Result<ResultSet> {
+        bail!("{} measures plans through EXPLAIN statements", self.server_info().flavor.name())
+    }
     /// Best-effort cancellation of the statement currently running.
     async fn cancel(&self) -> Result<()>;
     async fn ping(&self) -> Result<()>;
@@ -68,6 +74,13 @@ pub async fn run(conn: &dyn Connection, sql: &str, max_rows: Option<usize>) -> R
     let started = Instant::now();
     let result = conn.query(sql, max_rows).await?;
     Ok(QueryOutput { sql: sql.to_string(), result, elapsed: started.elapsed() })
+}
+
+/// Measures `sql` ([`Connection::measure`]) and records how long it took.
+pub async fn measure(conn: &dyn Connection, sql: &str) -> Result<QueryOutput> {
+    let started = Instant::now();
+    let rows = conn.measure(sql).await?;
+    Ok(QueryOutput { sql: sql.to_string(), result: StatementResult::Rows(rows), elapsed: started.elapsed() })
 }
 
 /// Reads a single scalar (first column of first row) as text.

@@ -345,7 +345,8 @@ fn prepare(plan: &Plan, collapsed: &[bool]) -> Prepared {
                 (rows, loops, inclusive.map(fmt_ms), bar)
             } else {
                 let rows = node.estimate.filter(|e| e.rows > 0.0).map(|e| format!("≈ {}", rows_text(e.rows)));
-                let cost = node.estimate.and_then(|e| e.cost);
+                // MySQL prints `cost=0 rows=0` on steps it doesn't estimate.
+                let cost = node.estimate.and_then(|e| e.cost.filter(|c| e.rows > 0.0 || c.total > 0.0));
                 let bar = cost.map(|c| (share(c.total), 0.0));
                 (rows.unwrap_or_default(), None, cost.map(|c| format!("cost {}", fmt_rows(c.total))), bar)
             };

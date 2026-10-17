@@ -536,9 +536,10 @@ fn tree(ui: &mut Ui, id: Id, view: &mut PlanView) {
             if analyzed {
                 if let Some(actual) = node.actual {
                     let misestimated = node.is_misestimated();
-                    let text = if actual.loops == 0 { "never ran".to_string() } else { fmt_rows(actual.rows) };
+                    let text =
+                        if actual.loops == 0 { Some("never ran".to_string()) } else { actual.rows.map(fmt_rows) };
                     let color = if misestimated && !on_accent { p.warning } else { strong };
-                    let text_w = number(cx, Columns::ROWS, &text, color);
+                    let text_w = text.map_or(0.0, |text| number(cx, Columns::ROWS, &text, color));
                     if misestimated && let Some(ratio) = node.row_estimate_ratio() {
                         let right = cx + Columns::ROWS - 8.0 - text_w - 5.0;
                         misestimate_badge(
@@ -906,13 +907,17 @@ fn detail(ui: &mut Ui, view: &PlanView, id: NodeId, open: &mut bool) {
                 if let Some(time) = actual.time {
                     if let Some(first) = time.first_row_ms {
                         facts.push(("First row, per loop", fmt_ms(first), None));
+                        facts.push(("Last row, per loop", fmt_ms(time.last_row_ms), None));
+                    } else {
+                        facts.push(("Time per loop", fmt_ms(time.last_row_ms), None));
                     }
-                    facts.push(("Last row, per loop", fmt_ms(time.last_row_ms), None));
                 }
-                facts.push(("Rows per loop", fmt_rows(actual.rows), None));
+                if let Some(rows) = actual.rows {
+                    facts.push(("Rows per loop", fmt_rows(rows), None));
+                }
                 facts.push(("Loops", fmt_count(actual.loops), None));
-                if actual.loops > 1 {
-                    facts.push(("Rows in all loops", fmt_rows(actual.rows * actual.loops as f64), None));
+                if let Some(rows) = actual.rows.filter(|_| actual.loops > 1) {
+                    facts.push(("Rows in all loops", fmt_rows(rows * actual.loops as f64), None));
                 }
             }
             if let Some(est) = node.estimate {

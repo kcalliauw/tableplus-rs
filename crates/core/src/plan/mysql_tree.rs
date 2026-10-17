@@ -148,12 +148,12 @@ fn node(text: &str) -> PlanNode {
                     }
                 }
                 if let (Some(rows), Some(loops)) = (rows, loops) {
-                    node.actual = Some(Actual { rows, loops, time });
+                    node.actual = Some(Actual { rows: Some(rows), loops, time });
                 }
             }
             Group::NeverExecuted => {
                 node.attributes.push(Attribute::new("actual", "never executed"));
-                node.actual = Some(Actual { rows: 0.0, loops: 0, time: None });
+                node.actual = Some(Actual { rows: Some(0.0), loops: 0, time: None });
             }
         }
     }
@@ -333,7 +333,7 @@ mod tests {
         assert_eq!(
             n.actual,
             Some(Actual {
-                rows: 33.7,
+                rows: Some(33.7),
                 loops: 12,
                 time: Some(ActualTime { first_row_ms: Some(244e-6), last_row_ms: 0.0983 })
             })
@@ -348,10 +348,10 @@ mod tests {
         let actual_only = one("-> Filter: (count(distinct o.order_id) >= 3)  (actual time=2.85..2.92 rows=49 loops=1)");
         assert_eq!(actual_only.estimate, None);
         assert_eq!(actual_only.condition.as_deref(), Some("count(distinct o.order_id) >= 3"));
-        assert_eq!(actual_only.actual.unwrap().rows, 49.0);
+        assert_eq!(actual_only.actual.unwrap().rows, Some(49.0));
 
         let never = one("-> Index lookup on t using k (a=1)  (cost=0.35 rows=1) (never executed)");
-        assert_eq!(never.actual, Some(Actual { rows: 0.0, loops: 0, time: None }));
+        assert_eq!(never.actual, Some(Actual { rows: Some(0.0), loops: 0, time: None }));
         assert_eq!(never.condition.as_deref(), Some("a=1"));
     }
 

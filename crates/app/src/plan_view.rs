@@ -15,6 +15,7 @@ use tableplus_core::model::ResultSet;
 use tableplus_core::plan::{self, NodeId, Plan, PlanFormat, PlanNode};
 
 use crate::icons::Icon;
+use crate::plan_flame::{self, Flame, Pick};
 use crate::theme::{self, Palette, palette};
 use crate::widgets::{self, fmt_count, fmt_factor, fmt_ms, fmt_rows};
 
@@ -53,6 +54,14 @@ impl PlanContent {
     }
 }
 
+/// How the pane shows a parsed plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Tree,
+    Flame,
+    Raw,
+}
+
 /// Derived numbers per node, computed once when the plan arrives.
 struct Metrics {
     inclusive_ms: Option<f64>,
@@ -64,7 +73,7 @@ pub struct PlanView {
     content: PlanContent,
     /// Why the plan differs from what was asked for, such as Analyze falling back to estimates.
     note: Option<String>,
-    show_raw: bool,
+    mode: Mode,
     collapsed: Vec<bool>,
     /// Rows on screen, top to bottom: the nodes whose ancestors are all expanded.
     visible: Vec<NodeId>,
@@ -77,6 +86,8 @@ pub struct PlanView {
     scroll_id: Option<Id>,
     /// When the tree was first drawn; its bars grow in from there.
     shown_at: Option<Instant>,
+    /// `None` when no step was timed.
+    flame: Option<Flame>,
 }
 
 impl PlanView {
@@ -84,7 +95,7 @@ impl PlanView {
         let mut view = Self {
             content,
             note,
-            show_raw: false,
+            mode: Mode::Tree,
             collapsed: Vec::new(),
             visible: Vec::new(),
             metrics: Vec::new(),
@@ -94,6 +105,7 @@ impl PlanView {
             scroll_to_selected: false,
             scroll_id: None,
             shown_at: None,
+            flame: None,
         };
         if let PlanContent::Tree(plan) = &view.content {
             view.collapsed = vec![false; plan.node_count()];
@@ -111,6 +123,7 @@ impl PlanView {
             } else {
                 plan.nodes().filter_map(|(_, n)| n.estimate?.cost.map(|c| c.total)).fold(0.0, f64::max)
             };
+            view.flame = Flame::new(plan);
             view.rebuild_visible();
         }
         view
@@ -196,6 +209,19 @@ impl PlanView {
         None
     }
 
+    /// Selects a step and opens its details, unfolding the tree down to it.
+    fn select(&mut self, id: NodeId) {
+        let Some(plan) = self.plan() else { return };
+        let ancestors: Vec<NodeId> = std::iter::successors(plan.parent(id), |n| plan.parent(*n)).collect();
+        for a in ancestors {
+            self.collapsed[a.index()] = false;
+        }
+        self.rebuild_visible();
+        self.selected = Some(id);
+        self.detail_open = true;
+        self.scroll_to_selected = true;
+    }
+
     /// Selects the `index`th visible row and opens its details.
     pub fn select_row(&mut self, index: usize) {
         if let Some(id) = self.visible.get(index.min(self.visible.len().saturating_sub(1))) {
@@ -213,7 +239,7 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut PlanView) {
     if let Some(note) = &view.note {
         banner(ui, id.with("note"), note, p.warning, p);
     }
-    if view.show_raw || view.plan().is_none() {
+    if view.mode == Mode::Raw || view.plan().is_none() {
         raw_view(ui, id, view.raw_text());
         return;
     }
@@ -229,7 +255,17 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut PlanView) {
             .show(ui, |ui| detail(ui, view, sel, &mut open));
         view.detail_open = open;
     }
-    egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| tree(ui, id, view));
+    egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| match (view.mode, &view.content) {
+        (Mode::Flame, PlanContent::Tree(plan)) => {
+            match plan_flame::show(ui, id.with("flame"), plan, view.flame.as_mut(), view.selected, view.detail_open) {
+                Some(Pick::Step(node)) => view.select(node),
+                Some(Pick::CloseDetail) => view.detail_open = false,
+                Some(Pick::Clear) => view.selected = None,
+                None => {}
+            }
+        }
+        _ => tree(ui, id, view),
+    });
 }
 
 fn toolbar(ui: &mut Ui, id: Id, view: &mut PlanView, p: &Palette) {
@@ -242,8 +278,9 @@ fn toolbar(ui: &mut Ui, id: Id, view: &mut PlanView, p: &Palette) {
             if let Some(plan) = view.plan() {
                 let kind = if plan.analyzed() { "Analyzed" } else { "Estimated" };
                 let label = format!("{kind} · {}", plan.format.label());
-                widgets::segmented(ui, &mut view.show_raw, &[(false, "Tree"), (true, "Raw")]);
-                if !view.show_raw {
+                let modes = [(Mode::Tree, "Tree"), (Mode::Flame, "Flame"), (Mode::Raw, "Raw")];
+                widgets::segmented(ui, &mut view.mode, &modes);
+                if view.mode == Mode::Tree {
                     ui.add_space(6.0);
                     if text_button(ui, "Expand all").clicked() {
                         view.set_all_collapsed(false);

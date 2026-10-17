@@ -16,6 +16,7 @@ use tableplus_core::plan::{self, NodeId, Plan, PlanFormat, PlanNode};
 
 use crate::icons::Icon;
 use crate::plan_flame::{self, Flame, Pick};
+use crate::plan_graph::{self, GraphView};
 use crate::theme::{self, Palette, palette};
 use crate::widgets::{self, fmt_count, fmt_factor, fmt_ms, fmt_rows};
 
@@ -54,10 +55,11 @@ impl PlanContent {
     }
 }
 
-/// How the pane shows a parsed plan.
+/// Which picture of the plan the pane shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Tree,
+    Graph,
     Flame,
     Raw,
 }
@@ -74,6 +76,7 @@ pub struct PlanView {
     /// Why the plan differs from what was asked for, such as Analyze falling back to estimates.
     note: Option<String>,
     mode: Mode,
+    graph: GraphView,
     collapsed: Vec<bool>,
     /// Rows on screen, top to bottom: the nodes whose ancestors are all expanded.
     visible: Vec<NodeId>,
@@ -96,6 +99,7 @@ impl PlanView {
             content,
             note,
             mode: Mode::Tree,
+            graph: GraphView::default(),
             collapsed: Vec::new(),
             visible: Vec::new(),
             metrics: Vec::new(),
@@ -211,14 +215,19 @@ impl PlanView {
 
     /// Selects a step and opens its details, unfolding the tree down to it.
     fn select(&mut self, id: NodeId) {
-        let Some(plan) = self.plan() else { return };
-        let ancestors: Vec<NodeId> = std::iter::successors(plan.parent(id), |n| plan.parent(*n)).collect();
+        self.selected = Some(id);
+        self.detail_open = true;
+        self.reveal_selected();
+    }
+
+    /// Unfolds the selected step's ancestors and scrolls to it, after another view moved the selection.
+    fn reveal_selected(&mut self) {
+        let Some((plan, sel)) = self.plan().zip(self.selected) else { return };
+        let ancestors: Vec<NodeId> = std::iter::successors(plan.parent(sel), |n| plan.parent(*n)).collect();
         for a in ancestors {
             self.collapsed[a.index()] = false;
         }
         self.rebuild_visible();
-        self.selected = Some(id);
-        self.detail_open = true;
         self.scroll_to_selected = true;
     }
 
@@ -256,6 +265,9 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut PlanView) {
         view.detail_open = open;
     }
     egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| match (view.mode, &view.content) {
+        (Mode::Graph, PlanContent::Tree(plan)) => {
+            plan_graph::show(ui, id.with("graph"), plan, &mut view.graph, &mut view.selected, &mut view.detail_open)
+        }
         (Mode::Flame, PlanContent::Tree(plan)) => {
             match plan_flame::show(ui, id.with("flame"), plan, view.flame.as_mut(), view.selected, view.detail_open) {
                 Some(Pick::Step(node)) => view.select(node),
@@ -278,8 +290,10 @@ fn toolbar(ui: &mut Ui, id: Id, view: &mut PlanView, p: &Palette) {
             if let Some(plan) = view.plan() {
                 let kind = if plan.analyzed() { "Analyzed" } else { "Estimated" };
                 let label = format!("{kind} · {}", plan.format.label());
-                let modes = [(Mode::Tree, "Tree"), (Mode::Flame, "Flame"), (Mode::Raw, "Raw")];
-                widgets::segmented(ui, &mut view.mode, &modes);
+                let modes = [(Mode::Tree, "Tree"), (Mode::Graph, "Graph"), (Mode::Flame, "Flame"), (Mode::Raw, "Raw")];
+                if widgets::segmented(ui, &mut view.mode, &modes) && view.mode == Mode::Tree {
+                    view.reveal_selected();
+                }
                 if view.mode == Mode::Tree {
                     ui.add_space(6.0);
                     if text_button(ui, "Expand all").clicked() {
@@ -1027,6 +1041,6 @@ fn detail(ui: &mut Ui, view: &PlanView, id: NodeId, open: &mut bool) {
 }
 
 /// A step as `key: value` lines, for the clipboard.
-fn node_text(node: &PlanNode) -> String {
+pub(crate) fn node_text(node: &PlanNode) -> String {
     node.attributes.iter().map(|a| format!("{}: {}", a.key, a.value)).collect::<Vec<_>>().join("\n")
 }

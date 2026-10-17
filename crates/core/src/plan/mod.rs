@@ -6,6 +6,7 @@
 //! for display. MySQL TREE text, MySQL and MariaDB JSON, PostgreSQL JSON and SQLite's
 //! `EXPLAIN QUERY PLAN` rows all fit it.
 
+mod access;
 mod mariadb_json;
 mod mysql_json;
 mod mysql_tree;
@@ -13,6 +14,7 @@ mod postgres_json;
 mod request;
 mod sqlite_eqp;
 
+pub use access::Access;
 pub use request::{ExplainMode, ExplainStatements, Unsupported, request};
 
 use crate::model::ResultSet;

@@ -16,6 +16,7 @@ mod icons;
 #[cfg(target_os = "macos")]
 mod macos_menu;
 mod plan_flame;
+mod plan_graph;
 mod plan_view;
 mod query_tab;
 mod quick_open;

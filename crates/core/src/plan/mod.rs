@@ -3,8 +3,8 @@
 //!
 //! The model keeps what the engines report in common. A node has an operation, the object it
 //! reads, a condition, the planner's estimate and the measured actuals, plus every raw attribute
-//! for display. MySQL TREE text, MySQL and MariaDB JSON, PostgreSQL JSON and SQLite's
-//! `EXPLAIN QUERY PLAN` rows all fit it.
+//! for display. MySQL TREE text, MySQL and MariaDB JSON, PostgreSQL JSON, SQLite's
+//! `EXPLAIN QUERY PLAN` rows and SQLite's measured scan status all fit it.
 
 mod access;
 mod mariadb_json;
@@ -13,6 +13,7 @@ mod mysql_tree;
 mod postgres_json;
 mod request;
 mod sqlite_eqp;
+mod sqlite_scanstatus;
 
 pub use access::Access;
 pub use request::{ExplainMode, ExplainStatements, Unsupported, request};
@@ -49,6 +50,9 @@ pub enum PlanFormat {
     PostgresJson,
     /// SQLite `EXPLAIN QUERY PLAN` rows.
     SqliteQueryPlan,
+    /// What SQLite measured per plan step while the statement ran (`sqlite3_stmt_scanstatus_v2`).
+    /// Step times are shares of counted CPU cycles, not timed.
+    SqliteScanStatus,
 }
 
 impl PlanFormat {
@@ -60,6 +64,7 @@ impl PlanFormat {
             PlanFormat::MariaDbJson => "MariaDB JSON",
             PlanFormat::PostgresJson => "PostgreSQL JSON",
             PlanFormat::SqliteQueryPlan => "SQLite query plan",
+            PlanFormat::SqliteScanStatus => "SQLite scan status (times from CPU cycles)",
         }
     }
 }
@@ -285,6 +290,7 @@ const PARSERS: &[Parser] = &[
     mariadb_json::parse,
     postgres_json::parse,
     sqlite_eqp::parse,
+    sqlite_scanstatus::parse,
 ];
 
 /// Reads a statement's result as a query plan. `None` when the result isn't a plan in a format

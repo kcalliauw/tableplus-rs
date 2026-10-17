@@ -119,44 +119,52 @@ const STEPS: &[(&str, &str, Tail)] = &[
     ("RECURSIVE STEP", "Recursive step", Tail::None),
 ];
 
-fn node(detail: &str) -> PlanNode {
+pub(super) fn node(detail: &str) -> PlanNode {
     let mut node = describe(detail.trim());
     node.attributes.insert(0, Attribute::new("detail", detail));
     node
 }
 
+/// A `SCAN` or `SEARCH` of a table, index or subquery: a loop, the only step SQLite estimates
+/// rows for.
+pub(super) fn is_loop(detail: &str) -> bool {
+    matches!(step(detail.trim()), Some((_, Tail::Access, _)))
+}
+
+/// The first entry of [`STEPS`] that `detail` matches, with the text after its keywords.
+fn step(detail: &str) -> Option<(&'static str, Tail, &str)> {
+    STEPS.iter().find_map(|(keywords, operation, tail)| {
+        let rest = match tail {
+            Tail::None if detail == *keywords => "",
+            Tail::None => return None,
+            _ => detail.strip_prefix(keywords)?.trim(),
+        };
+        Some((*operation, *tail, rest))
+    })
+}
+
 /// Splits a `detail` text into operation, object, index and condition. Wording it doesn't know
 /// becomes the operation as it stands.
 fn describe(detail: &str) -> PlanNode {
-    for (keywords, operation, tail) in STEPS {
-        let rest = match tail {
-            Tail::None if detail == *keywords => "",
-            Tail::None => continue,
-            _ => match detail.strip_prefix(keywords) {
-                Some(rest) => rest.trim(),
-                None => continue,
-            },
-        };
-        return match tail {
-            Tail::None => PlanNode::new(*operation),
-            Tail::Access => access(operation, rest),
-            Tail::Object => {
-                let (object, rest) = take_name(rest);
-                let mut node = PlanNode::new(*operation);
-                node.object = Some(object.to_string());
-                node.condition = condition(rest);
-                node
-            }
-            Tail::Condition => {
-                let mut node = PlanNode::new(*operation);
-                node.condition = condition(rest);
-                node
-            }
-            Tail::Name if rest.is_empty() => PlanNode::new(*operation),
-            Tail::Name => PlanNode::new(format!("{operation} {rest}")),
-        };
+    let Some((operation, tail, rest)) = step(detail) else { return PlanNode::new(detail) };
+    match tail {
+        Tail::None => PlanNode::new(operation),
+        Tail::Access => access(operation, rest),
+        Tail::Object => {
+            let (object, rest) = take_name(rest);
+            let mut node = PlanNode::new(operation);
+            node.object = Some(object.to_string());
+            node.condition = condition(rest);
+            node
+        }
+        Tail::Condition => {
+            let mut node = PlanNode::new(operation);
+            node.condition = condition(rest);
+            node
+        }
+        Tail::Name if rest.is_empty() => PlanNode::new(operation),
+        Tail::Name => PlanNode::new(format!("{operation} {rest}")),
     }
-    PlanNode::new(detail)
 }
 
 /// `od2 USING COVERING INDEX sqlite_autoindex_order_details_1 (order_id=?) LEFT-JOIN`

@@ -23,6 +23,7 @@ use crate::model::{
     ColumnInfo, ColumnMeta, ConstraintInfo, ConstraintKind, IndexInfo, ObjectKind, ResultSet, Row, SchemaObject,
     StatementResult, TableStructure,
 };
+use crate::server::{Flavor, ServerInfo};
 use crate::tunnel::{SshTunnel, open_tunnel};
 use crate::value::{Value, parse_hex};
 
@@ -247,6 +248,10 @@ impl Connection for PgConnection {
 
     fn server_version(&self) -> String {
         format!("PostgreSQL {}", self.version)
+    }
+
+    fn server_info(&self) -> ServerInfo {
+        ServerInfo::from_version_text(Flavor::Postgres, &self.version)
     }
 
     fn database(&self) -> String {

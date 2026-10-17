@@ -11,7 +11,7 @@ use tableplus_core::config::SslMode;
 use tableplus_core::driver;
 use tableplus_core::model::{ConstraintKind, ObjectKind};
 use tableplus_core::sqlgen::{self, Filter, FilterOp, SortKey};
-use tableplus_core::{StatementResult, Value};
+use tableplus_core::{Flavor, StatementResult, Value};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn metadata() {
@@ -19,6 +19,8 @@ async fn metadata() {
         return;
     };
     assert!(conn.server_version().starts_with("PostgreSQL 17"), "{}", conn.server_version());
+    let info = conn.server_info();
+    assert_eq!((info.flavor, info.version.major), (Flavor::Postgres, 17), "{info}");
     assert_eq!(conn.database(), "shop");
     assert!(conn.list_databases().await.unwrap().contains(&"shop".to_string()));
     let schemas = conn.list_schemas().await.unwrap();

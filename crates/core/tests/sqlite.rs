@@ -9,7 +9,7 @@ use tableplus_core::config::Credentials;
 use tableplus_core::driver;
 use tableplus_core::model::{ConstraintKind, ObjectKind};
 use tableplus_core::sqlgen::{self, SortKey};
-use tableplus_core::{StatementResult, Value};
+use tableplus_core::{Flavor, StatementResult, Value};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sqlite_end_to_end() {
@@ -17,6 +17,7 @@ async fn sqlite_end_to_end() {
     let cfg = sqlite_fixture(dir.path()).await;
     let conn = driver::connect(&cfg, &Credentials::default()).await.unwrap();
     assert!(conn.server_version().starts_with("SQLite 3."));
+    assert_eq!((conn.server_info().flavor, conn.server_info().version.major), (Flavor::Sqlite, 3));
     assert_eq!(conn.database(), "shop.sqlite");
     assert_eq!(conn.list_schemas().await.unwrap(), vec!["main"]);
 

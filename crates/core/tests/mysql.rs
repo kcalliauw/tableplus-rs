@@ -11,7 +11,7 @@ use tableplus_core::config::SslMode;
 use tableplus_core::driver;
 use tableplus_core::model::{ConstraintKind, ObjectKind};
 use tableplus_core::sqlgen::{self, Filter, FilterOp, SortKey};
-use tableplus_core::{StatementResult, Value};
+use tableplus_core::{Flavor, StatementResult, Value};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn mysql_metadata() {
@@ -19,6 +19,8 @@ async fn mysql_metadata() {
         return;
     };
     assert!(conn.server_version().starts_with("MySQL 8.4"), "{}", conn.server_version());
+    let info = conn.server_info();
+    assert_eq!((info.flavor, info.version.major, info.version.minor), (Flavor::MySql, 8, 4), "{info}");
     assert_eq!(conn.default_schema(), "shop");
     let schemas = conn.list_schemas().await.unwrap();
     assert_eq!(schemas, vec!["analytics", "shop"]);
@@ -163,6 +165,8 @@ async fn mariadb_metadata_and_editing() {
         return;
     };
     assert!(conn.server_version().starts_with("MariaDB 11"), "{}", conn.server_version());
+    let info = conn.server_info();
+    assert_eq!((info.flavor, info.version.major), (Flavor::MariaDb, 11), "{info}");
     let objects = conn.list_objects().await.unwrap();
     assert!(objects.iter().any(|o| o.name == "vip_customers" && o.kind == ObjectKind::View));
     let customers = conn.table_structure("shop", "customers").await.unwrap();

@@ -16,6 +16,7 @@ use crate::model::{
     ColumnInfo, ColumnMeta, ConstraintInfo, ConstraintKind, IndexInfo, ObjectKind, ResultSet, Row, SchemaObject,
     StatementResult, TableStructure,
 };
+use crate::server::{Flavor, ServerInfo};
 use crate::value::Value;
 
 const D: Dialect = Dialect::Sqlite;
@@ -102,6 +103,10 @@ impl Connection for SqliteConnection {
 
     fn server_version(&self) -> String {
         format!("SQLite {}", self.version)
+    }
+
+    fn server_info(&self) -> ServerInfo {
+        ServerInfo::from_version_text(Flavor::Sqlite, &self.version)
     }
 
     fn database(&self) -> String {

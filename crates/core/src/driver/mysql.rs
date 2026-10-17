@@ -16,6 +16,7 @@ use crate::model::{
     ColumnInfo, ColumnMeta, ConstraintInfo, ConstraintKind, IndexInfo, ObjectKind, ResultSet, Row, SchemaObject,
     StatementResult, TableStructure,
 };
+use crate::server::{Flavor, ServerInfo};
 use crate::tunnel::{SshTunnel, open_tunnel};
 use crate::value::Value;
 
@@ -285,6 +286,10 @@ impl Connection for MyConnection {
     fn server_version(&self) -> String {
         let v = self.version.split('-').next().unwrap_or_default();
         if self.mariadb { format!("MariaDB {v}") } else { format!("MySQL {v}") }
+    }
+
+    fn server_info(&self) -> ServerInfo {
+        ServerInfo::from_version_text(if self.mariadb { Flavor::MariaDb } else { Flavor::MySql }, &self.version)
     }
 
     fn database(&self) -> String {

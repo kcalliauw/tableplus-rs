@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use crate::config::{ConnectionConfig, Credentials, DriverKind};
 use crate::dialect::Dialect;
 use crate::model::{ColumnMeta, QueryOutput, Row, SchemaObject, StatementResult, TableStructure};
+use crate::server::ServerInfo;
 
 /// Receives rows in batches from [`Connection::query_batches`].
 pub type BatchSink<'a> = dyn FnMut(&[ColumnMeta], Vec<Row>) -> Result<()> + Send + 'a;
@@ -25,6 +26,8 @@ pub trait Connection: Send + Sync {
     fn dialect(&self) -> Dialect;
     /// e.g. `PostgreSQL 17.6`.
     fn server_version(&self) -> String;
+    /// The engine and version, for behavior that depends on them.
+    fn server_info(&self) -> ServerInfo;
     /// The database this connection is bound to (file name for SQLite).
     fn database(&self) -> String;
     /// Schema selected by default in the sidebar.

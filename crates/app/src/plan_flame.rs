@@ -621,8 +621,10 @@ fn tooltip(ui: &mut Ui, plan: &Plan, id: NodeId, bar: &Bar, total_ms: f64) {
             if actual.loops == 0 {
                 fact("Rows", "never ran".into());
             } else {
-                let per = if actual.loops > 1 { " per loop" } else { "" };
-                fact("Rows", format!("{}{per}", fmt_rows(actual.rows)));
+                if let Some(rows) = actual.rows {
+                    let per = if actual.loops > 1 { " per loop" } else { "" };
+                    fact("Rows", format!("{}{per}", fmt_rows(rows)));
+                }
                 fact("Loops", fmt_count(actual.loops));
             }
         }
@@ -870,8 +872,11 @@ mod tests {
 
     fn timed(op: &str, last: f64, loops: u64) -> PlanNode {
         let mut n = PlanNode::new(op);
-        n.actual =
-            Some(Actual { rows: 1.0, loops, time: Some(ActualTime { first_row_ms: Some(0.0), last_row_ms: last }) });
+        n.actual = Some(Actual {
+            rows: Some(1.0),
+            loops,
+            time: Some(ActualTime { first_row_ms: Some(0.0), last_row_ms: last }),
+        });
         n
     }
 

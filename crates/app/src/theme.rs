@@ -72,6 +72,11 @@ pub struct Palette {
     /// Plan tree indent guides, and the guide of the selected step's subtree.
     pub plan_guide: Color32,
     pub plan_guide_active: Color32,
+    /// Flame chart own time: too small a share of the statement to matter, then notable through
+    /// to the largest.
+    pub plan_heat_low: Color32,
+    pub plan_heat_mid: Color32,
+    pub plan_heat_high: Color32,
 }
 
 const fn hex(rgb: u32) -> Color32 {
@@ -119,6 +124,9 @@ pub static LIGHT: Palette = Palette {
     plan_tick: hex(0x1D1D1F),
     plan_guide: hex(0xE1E3E8),
     plan_guide_active: hex(0x8DB4F6),
+    plan_heat_low: hex(0x8FB9F7),
+    plan_heat_mid: hex(0xF4C870),
+    plan_heat_high: hex(0xF49A95),
 };
 
 pub static DARK: Palette = Palette {
@@ -162,6 +170,9 @@ pub static DARK: Palette = Palette {
     plan_tick: hex(0xF2F2F4),
     plan_guide: hex(0x343438),
     plan_guide_active: hex(0x3F69B0),
+    plan_heat_low: hex(0x3866AE),
+    plan_heat_mid: hex(0x8A6422),
+    plan_heat_high: hex(0x9B3B37),
 };
 
 pub fn palette(ui: &Ui) -> &'static Palette {

@@ -12,11 +12,9 @@ use crate::theme::{self, Palette, palette};
 use crate::widgets::{fmt_count, fmt_ms, fmt_rows};
 
 const BAR_H: f32 = 22.0;
-/// Steps the server didn't time get a thinner bar.
 const UNTIMED_H: f32 = 14.0;
 /// Own time below this share of the statement stays a quiet blue; from it, amber warms to red.
 const NOTABLE_SHARE: f64 = 0.01;
-/// Own time at this share of the statement or more gets the hottest color.
 const HOT_SHARE: f64 = 0.3;
 
 /// Own time as a color. Blue to amber has no clean blend, it goes through grey, so a share
@@ -34,7 +32,6 @@ fn fmt_share(share: f64) -> String {
     if share > 0.0 && share < 0.005 { "<1%".into() } else { format!("{:.0}%", share * 100.0) }
 }
 
-/// How one bar is drawn this frame.
 pub(super) struct Look {
     pub(super) hovered: bool,
     pub(super) selected: bool,
@@ -223,7 +220,7 @@ pub(super) fn tooltip(ui: &mut Ui, plan: &Plan, id: NodeId, bar: &Bar, total_ms:
     }
 }
 
-/// The breadcrumb of the zoom and the color legend. Returns a crumb that was clicked.
+/// The zoom breadcrumb and the colour legend. Returns a clicked crumb.
 pub(super) fn header_strip(ui: &mut Ui, id: Id, rect: Rect, plan: &Plan, flame: &Flame, p: &Palette) -> Option<NodeId> {
     let painter = ui.painter().clone();
     painter.rect_filled(rect, CornerRadius::ZERO, p.header_bg);

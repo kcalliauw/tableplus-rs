@@ -21,7 +21,6 @@ const HEADER_H: f32 = 28.0;
 const PAD: f32 = 10.0;
 const CHEVRON: f32 = 16.0;
 const BAR_H: f32 = 8.0;
-/// Horizontal room around a `temp table` badge's text.
 pub(super) const BADGE_PAD: f32 = 10.0;
 const GROW_SECONDS: f32 = 0.45;
 
@@ -67,7 +66,6 @@ pub(super) fn show(ui: &mut Ui, id: Id, view: &mut PlanView) {
     }
     let has_focus = ui.memory(|m| m.has_focus(id));
     let p = palette(ui);
-    // Bars grow in when a plan first appears.
     let since = view.shown_at.get_or_insert_with(Instant::now).elapsed().as_secs_f32();
     let grow = ease_out((since / GROW_SECONDS).min(1.0));
     if grow < 1.0 {
@@ -183,7 +181,7 @@ pub(super) fn show(ui: &mut Ui, id: Id, view: &mut PlanView) {
             painter.rect_filled(row_rect, CornerRadius::ZERO, bg);
             let cy = row_rect.center().y;
 
-            // Indent guides, one per ancestor level; the selected step's subtree is highlighted.
+            // Indent guides; the selected step's subtree is highlighted.
             let in_selection = view.selected.is_some_and(|s| s != node_id && is_within(plan, node_id, s));
             for level in 0..depth {
                 let x = chevron_x(level) + CHEVRON / 2.0;
@@ -421,7 +419,6 @@ enum Move {
     Deselect,
 }
 
-/// What a navigation key does: arrows move, Left and Right fold and unfold, Space toggles.
 fn next_move(view: &PlanView, key: Key, page: usize) -> Option<Move> {
     let plan = view.plan()?;
     let row = view.selected.and_then(|s| view.visible.iter().position(|v| *v == s));
@@ -447,7 +444,6 @@ fn next_move(view: &PlanView, key: Key, page: usize) -> Option<Move> {
     })
 }
 
-/// The whole step on one line, for the tooltip of an elided row.
 fn full_label(node: &PlanNode) -> String {
     let parts =
         [node.role.as_ref(), Some(&node.operation), node.object.as_ref(), node.index.as_ref(), node.condition.as_ref()];
@@ -482,7 +478,7 @@ fn label(ui: &Ui, node: &PlanNode, max_w: f32, on_accent: bool, p: &Palette) -> 
     ui.painter().layout_job(job)
 }
 
-/// `temp table`, `filesort`: an outlined tag starting at `left_center`. Returns its width.
+/// An outlined tag such as `temp table`. Returns its width.
 pub(super) fn extra_badge(
     painter: &Painter,
     left_center: Pos2,
@@ -502,7 +498,7 @@ fn chevron(painter: &Painter, center: Pos2, open: f32, color: Color32) {
     painter.add(Shape::convex_polygon(vec![rot(-2.5, -4.0), rot(3.5, 0.0), rot(-2.5, 4.0)], color, Stroke::NONE));
 }
 
-/// `▲ 67×`: actual rows above (▲) or below (▼) the estimate, right-aligned at `right_center`.
+/// `▲ 67×`: actual rows above (▲) or below (▼) the estimate.
 fn misestimate_badge(painter: &Painter, right_center: Pos2, ratio: f64, color: Color32) {
     let factor = if ratio >= 1.0 { ratio } else { 1.0 / ratio };
     let g = painter.layout_no_wrap(format!("{}×", fmt_factor(factor)), theme::bold_font(10.5), color);

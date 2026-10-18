@@ -1,8 +1,6 @@
-//! Where each step of a plan sits in the graph: a tidy tree with the result at the top and the
-//! table reads at the bottom, so rows flow upward as in MySQL Workbench's Visual Explain. A
-//! parent sits centred over its first and last child, and each subtree packs against its left
-//! neighbour as closely as their row-by-row outlines allow (Reingold–Tilford). Computed once per
-//! plan and collapse state, never per frame.
+//! Where each step sits in the graph: a tidy tree with the result at the top, so rows flow upward.
+//! A parent sits centred over its first and last child, and each subtree packs against its left
+//! neighbour as closely as their row-by-row outlines allow (Reingold–Tilford).
 
 use eframe::egui::{Rect, pos2, vec2};
 use tableplus_core::plan::{NodeId, Plan};
@@ -54,7 +52,6 @@ impl Layout {
         self.rects[id.index()]
     }
 
-    /// The row a shown step is on, counted from the top.
     pub fn row_of(&self, id: NodeId) -> Option<usize> {
         let top = self.rect(id)?.top();
         Some((top / (NODE_H + ROW_GAP)).round() as usize)
@@ -111,8 +108,6 @@ mod tests {
     use super::*;
     use tableplus_core::plan::{PlanFormat, PlanNode};
 
-    /// The 60-table join chain from phase 1's deep-plan check: each join's outer input is the
-    /// join below it and its inner input a single-row lookup.
     fn join_chain(tables: usize) -> Plan {
         let mut plan = Plan::new(PlanFormat::MySqlTree, PlanNode::new("Aggregate"), "");
         let mut joins = Vec::new();

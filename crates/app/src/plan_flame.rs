@@ -1,8 +1,6 @@
 //! The Plan pane's flame chart. Every step is a bar as wide as its time, with the steps it runs
-//! beneath it, so the widest bars show where a statement spent its time. The right-hand part of a
-//! bar with nothing beneath it is the step's own time, colored by its share of the statement.
-//! Double-click zooms into a step; the breadcrumb, Esc and Home zoom back out, and ⌘-scroll or a
-//! pinch zooms freely around the pointer.
+//! beneath it; the right-hand part with nothing beneath it is the step's own time. Double-click
+//! zooms into a step, and the breadcrumb, Esc and Home zoom back out.
 
 use std::time::{Duration, Instant};
 
@@ -22,7 +20,6 @@ const ROW_H: f32 = 24.0;
 const PAD: f32 = 10.0;
 const ZOOM_SECONDS: f32 = 0.38;
 const REVEAL_SECONDS: f32 = 0.3;
-/// The narrowest window, as a share of the whole plan.
 const MIN_WINDOW: f64 = 1e-6;
 
 /// A horizontal extent, in fractions of the root bar's width.
@@ -51,27 +48,22 @@ impl Span {
 
 struct Bar {
     span: Span,
-    /// The right-hand part of the bar with no step beneath it: the step's own time.
     own: f64,
     /// The step's own time as a share of the statement's; `None` when the server didn't time it.
     heat: Option<f64>,
-    /// What the steps below report in all, when that is more than this step reports. The bar
-    /// then spans them, and its label keeps the step's own number. Steps are timed separately and
-    /// MySQL averages over loops, so nested times don't always add up; MySQL 8.0.18 times a scan
-    /// of a temporary table without the materialization below it, 4 µs over 6.6 ms of work.
+    /// What the steps below report in all, when it is more than this step reports; the bar spans
+    /// them. Steps are timed separately and MySQL averages over loops, so nested times don't always
+    /// add up: MySQL 8.0.18 times a temporary table scan without the materialization below it.
     stretched: Option<f64>,
 }
 
-/// The flame chart of one plan: bar geometry, computed once, and the zoom.
 pub struct Flame {
     bars: Vec<Bar>,
     /// Steps by depth, left to right.
     rows: Vec<Vec<NodeId>>,
-    /// The statement's time, [`Plan::total_ms`], which shares are of. The root bar can span
-    /// more, when steps below report more than any one step covers.
+    /// The statement's time, which shares are of; the root bar can span more.
     total_ms: f64,
     camera: Camera,
-    /// When the chart was first drawn; its rows unfold from there.
     shown_at: Option<Instant>,
     /// The selection the chart last brought into view.
     seen: Option<NodeId>,
@@ -82,7 +74,6 @@ pub struct Flame {
     clicked: Option<NodeId>,
 }
 
-/// The part of the plan that fills the chart's width, gliding when it changes.
 struct Camera {
     /// Where the camera is going, or is.
     window: Span,
@@ -113,9 +104,8 @@ impl Camera {
     }
 }
 
-/// The window `t` of the way from `from` to `to`. The narrower of the two moves and grows
-/// linearly on screen, so in a deep zoom the step being zoomed into stays in view throughout;
-/// interpolating the window's edges instead would leave it a sliver until the last frames.
+/// The window `t` of the way from `from` to `to`. The narrower span grows linearly on screen, so
+/// a deep zoom keeps its step in view; interpolating the edges would leave a sliver until the end.
 fn glide(from: Span, to: Span, t: f64) -> Span {
     if t <= 0.0 || t >= 1.0 {
         return if t <= 0.0 { from } else { to };
@@ -130,7 +120,6 @@ fn glide(from: Span, to: Span, t: f64) -> Span {
 }
 
 impl Flame {
-    /// The chart of a plan with measured step times; `None` when nothing was timed.
     pub fn new(plan: &Plan) -> Option<Self> {
         let ids: Vec<NodeId> = plan.nodes().map(|(id, _)| id).collect();
         // Each bar is as wide as the step's time or the steps below it, whichever is more, and a
@@ -205,7 +194,6 @@ impl Flame {
         false
     }
 
-    /// Sets the window directly, as a pinch or a sideways scroll does, keeping it on the plan.
     fn set_window(&mut self, plan: &Plan, width: f64, left: f64) {
         let width = width.clamp(MIN_WINDOW, 1.0);
         let window = Span { left: left.clamp(0.0, 1.0 - width), width };
@@ -237,14 +225,12 @@ impl Flame {
             .copied()
     }
 
-    /// The bar beside `id` in its row, `step` places to the right.
     fn neighbour(&self, plan: &Plan, id: NodeId, step: isize) -> Option<NodeId> {
         let row = &self.rows[plan.depth(id)];
         let at = row.iter().position(|n| *n == id)?.checked_add_signed(step)?;
         row.get(at).copied()
     }
 
-    /// Brings a selection made elsewhere, in the tree or by a key, into view.
     fn follow_selection(&mut self, plan: &Plan, selected: Option<NodeId>) {
         if selected == self.seen {
             return;
@@ -259,7 +245,6 @@ impl Flame {
     }
 }
 
-/// `id` and the steps above it, up to the root.
 fn ancestry(plan: &Plan, id: NodeId) -> impl Iterator<Item = NodeId> + '_ {
     std::iter::successors(Some(id), |n| plan.parent(*n))
 }
@@ -272,7 +257,7 @@ fn ease_out(t: f32) -> f32 {
     1.0 - (1.0 - t).powi(3)
 }
 
-/// Draws the chart, or why there is none, and reports what a click or key picked.
+/// Draws the chart, or why there is none, and returns what the user picked.
 pub fn show(
     ui: &mut Ui,
     id: Id,
@@ -445,8 +430,7 @@ enum Press {
     Double,
 }
 
-/// Arrows walk the bars, Enter zooms in, Home zooms all the way out, and Esc zooms out a step,
-/// then closes the details, then clears the selection.
+/// Esc zooms out a step, then closes the details, then clears the selection.
 fn keyboard(ui: &Ui, plan: &Plan, flame: &mut Flame, selected: Option<NodeId>, detail_open: bool) -> Option<PlanEvent> {
     let pressed: Vec<Key> = ui.input(|i| {
         [Key::ArrowUp, Key::ArrowDown, Key::ArrowLeft, Key::ArrowRight, Key::Enter, Key::Space, Key::Escape, Key::Home]
@@ -528,18 +512,15 @@ mod tests {
         assert!(close(flame.span(hash).left, 0.2) && close(flame.span(hash).width, 0.3));
         assert_eq!(flame.span(inner), flame.span(hash));
         assert!(close(flame.span(lookup).left, 0.5) && close(flame.span(lookup).width, 0.1));
-        // 10 ms less the 6 ms below: the right 40% of the join is its own.
-        assert!(close(flame.bars[root.index()].own, 0.4));
+        assert!(close(flame.bars[root.index()].own, 0.4), "10 ms less the 6 ms below is the join's own");
         assert!(close(flame.bars[root.index()].heat.unwrap(), 0.4));
         assert_eq!(flame.rows, vec![vec![root], vec![scan, hash, lookup], vec![inner]]);
-        // The untimed hash spans its scan, with no heat and no mark.
         let bar = &flame.bars[hash.index()];
-        assert_eq!((bar.heat, bar.stretched), (None, None));
+        assert_eq!((bar.heat, bar.stretched), (None, None), "the untimed hash spans its scan, unmarked");
     }
 
     #[test]
     fn a_step_spans_steps_below_that_report_more_time_and_is_marked() {
-        // MySQL 8.0.18: a 30 µs scan of a temporary table over 8 ms of materialization.
         let mut plan = Plan::new(PlanFormat::MySqlTree, timed("scan", 0.03, 1), "");
         let a = plan.add_child(NodeId::ROOT, timed("materialize", 6.0, 1));
         let b = plan.add_child(NodeId::ROOT, timed("scan", 2.0, 1));
@@ -549,22 +530,19 @@ mod tests {
         let root = &flame.bars[0];
         assert_eq!(root.stretched, Some(8.0));
         assert!(close(root.own, 0.0));
-        // Shares are of the longest step, as in the tree and the summary.
-        assert!(close(flame.total_ms, 6.0));
+        assert!(close(flame.total_ms, 6.0), "shares are of the longest step, as in the tree");
         assert!(close(flame.bars[a.index()].heat.unwrap(), 1.0));
         assert!(close(flame.bars[b.index()].heat.unwrap(), 2.0 / 6.0));
-        // A stretched step widens its parent only as far as the parent's own time allows.
         let mut plan = Plan::new(PlanFormat::MySqlTree, timed("join", 10.0, 1), "");
         let x = plan.add_child(NodeId::ROOT, timed("lookup", 1.0, 1));
         plan.add_child(x, timed("materialize", 4.0, 1));
         let z = plan.add_child(NodeId::ROOT, timed("scan", 5.0, 1));
         let flame = Flame::new(&plan).unwrap();
         assert!(close(flame.span(x).width, 0.4) && close(flame.span(z).left, 0.4));
-        assert!(close(flame.bars[0].own, 0.1));
-        // Rounding in the engine's three digits is not worth a mark.
+        assert!(close(flame.bars[0].own, 0.1), "a stretched step widens its parent only into its own time");
         let mut plan = Plan::new(PlanFormat::MySqlTree, timed("join", 1.0, 1), "");
         plan.add_child(NodeId::ROOT, timed("scan", 1.02, 1));
-        assert_eq!(Flame::new(&plan).unwrap().bars[0].stretched, None);
+        assert_eq!(Flame::new(&plan).unwrap().bars[0].stretched, None, "rounding is not worth a mark");
     }
 
     #[test]
@@ -579,11 +557,9 @@ mod tests {
         let to = Span { left: 0.4, width: 0.001 };
         assert_eq!(glide(Span::ALL, to, 0.0), Span::ALL);
         assert_eq!(glide(Span::ALL, to, 1.0), to);
-        // Halfway into a 1000× zoom, the target already fills about half the chart.
         let half = glide(Span::ALL, to, 0.5);
         let on_screen = to.width / half.width;
-        assert!((on_screen - 0.5005).abs() < 1e-6, "{on_screen}");
-        // Zooming back out mirrors it.
+        assert!((on_screen - 0.5005).abs() < 1e-6, "halfway into a 1000× zoom the target fills {on_screen}");
         let back = glide(to, Span::ALL, 0.5);
         assert!((to.width / back.width - 0.5005).abs() < 1e-6);
     }
@@ -594,9 +570,8 @@ mod tests {
         let mut flame = Flame::new(&plan).unwrap();
         flame.zoom_to(inner);
         assert_eq!((flame.camera.focus, flame.camera.window), (inner, flame.span(inner)));
-        // The untimed hash is exactly as wide as its scan, so Esc skips past it to the join.
         assert!(flame.zoom_out(&plan));
-        assert_eq!(flame.camera.focus, root);
+        assert_eq!(flame.camera.focus, root, "Esc skips the hash, exactly as wide as its scan");
         assert!(!flame.zoom_out(&plan));
         assert_eq!(flame.deepest_containing(&plan, flame.span(hash)), inner);
     }

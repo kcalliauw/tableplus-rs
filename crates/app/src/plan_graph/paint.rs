@@ -1,5 +1,4 @@
-//! Painting the graph: boxes, join diamonds, edges, the Result cap, the legend and tooltips,
-//! at the camera's zoom.
+//! Painting the graph at the camera's zoom.
 
 use eframe::egui::emath::TSTransform;
 use eframe::egui::epaint::{CubicBezierShape, Mesh, Shadow, TextShape};
@@ -31,9 +30,8 @@ fn legend_label(access: Access) -> &'static str {
     }
 }
 
-/// Text is laid out at a font size close to the zoom and its glyphs scaled the rest of the way.
-/// At rest that size follows the zoom finely, so text is crisp; while the zoom moves it steps by
-/// powers of √2, so a zoom gesture doesn't rasterize the font at every size it passes.
+/// Text is laid out near the zoom's font size and its glyphs scaled the rest of the way. While the
+/// zoom moves, that size steps by powers of √2, so a gesture doesn't rasterize every size it passes.
 #[derive(Clone, Copy)]
 pub(super) struct TextScale {
     pub(super) layout: f32,
@@ -68,7 +66,6 @@ fn elide(job: &mut LayoutJob, max_width: f32, scale: TextScale) {
     job.wrap.break_anywhere = true;
 }
 
-/// Paints `job` anchored at `pos` and returns its size on screen.
 fn paint_text(painter: &Painter, pos: Pos2, align: Align2, job: LayoutJob, scale: TextScale) -> Vec2 {
     let galley = painter.layout_job(job);
     let mut shape = TextShape::new(Pos2::ZERO, galley, Color32::PLACEHOLDER);
@@ -90,7 +87,6 @@ fn radius(r: f32) -> CornerRadius {
     CornerRadius::same(r.round().clamp(0.0, 255.0) as u8)
 }
 
-/// What a frame paints with.
 pub(super) struct Frame<'a> {
     pub(super) painter: &'a Painter,
     pub(super) canvas: Rect,
@@ -184,8 +180,7 @@ pub(super) fn paint_box(f: &Frame, r: Rect, node: &PlanNode, step: &Step, look: 
         painter.rect_filled(strip, CornerRadius { nw: corner.nw, sw: corner.sw, ne: 0, se: 0 }, fade(c));
     }
 
-    // Along the bottom: the share of the statement's time with the steps below and in the step
-    // itself, or of the plan's cost below the step and counted by it.
+    // Along the bottom: the share of the time or cost with the steps below and in the step itself.
     if let Some((total, own)) = step.bar {
         let track = Rect::from_min_max(
             pos2(r.left() + 14.0 * z, r.bottom() - 9.5 * z),
@@ -206,8 +201,7 @@ pub(super) fn paint_box(f: &Frame, r: Rect, node: &PlanNode, step: &Step, look: 
     let left = r.left() + 14.0 * z;
     let w = (r.right() - 10.0 * z - left) / z;
     let (text, muted, faint) = (fade(p.text), fade(p.text_muted), fade(p.text_faint));
-    // A long name without an object or condition, such as `Aggregate using temporary table`,
-    // takes the second line too.
+    // A long name with no object or condition, such as `Aggregate using temporary table`, wraps.
     let has_detail = node.object.is_some() || node.index.is_some() || node.condition.is_some();
     // Badges for side work sit top right, and the title gives up their width.
     let mut badge_right = r.right() - 10.0 * z;
@@ -334,7 +328,7 @@ fn selection_ring(f: &Frame, r: Rect, corner: CornerRadius, alpha: f32) {
     f.painter.rect_stroke(r, corner, Stroke::new(2.0, color.gamma_multiply(alpha)), StrokeKind::Outside);
 }
 
-/// `▲ 67×`: actual rows above (▲) or below (▼) the estimate, starting at `left_center`.
+/// `▲ 67×`: actual rows above (▲) or below (▼) the estimate.
 fn misestimate_badge(f: &Frame, left_center: Pos2, ratio: f64, scale: TextScale, alpha: f32) {
     let z = f.zoom();
     let color = f.p.warning.gamma_multiply(alpha);
@@ -383,15 +377,13 @@ pub(super) fn fold_pill_rect(card: Rect, zoom: f32) -> Rect {
     Rect::from_center_size(pos2(card.center().x, card.bottom() + 28.0 * zoom), vec2(46.0, 20.0) * zoom)
 }
 
-/// Edges widen with the logarithm of the rows they carry: 1 row is a hairline, 100,000 rows the
-/// widest.
+/// Edges widen with the logarithm of their rows: 1 row is a hairline, 100,000 rows the widest.
 fn edge_width(flow: Option<f64>) -> f32 {
     flow.map_or(1.25, |rows| (1.0 + 1.35 * (1.0 + rows).log10() as f32).min(7.0))
 }
 
 /// An edge from a step up to its parent, in graph points.
 pub(super) struct Edge {
-    /// Cubic Bézier control points, from the child's top to the parent.
     points: [Pos2; 4],
     /// The height of the middle of the gap between the rows, where the row count goes.
     label_y: f32,
@@ -572,7 +564,6 @@ pub(super) fn tooltip(ui: &mut Ui, node: &PlanNode, step: &Step, analyzed: bool,
     }
 }
 
-/// The colours in use, bottom left.
 pub(super) fn legend(ui: &Ui, canvas: Rect, prepared: &Prepared, p: &Palette, dark: bool) {
     if prepared.legend.is_empty() && !prepared.has_joins {
         return;

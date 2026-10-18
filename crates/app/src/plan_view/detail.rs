@@ -182,8 +182,6 @@ pub(super) fn detail(ui: &mut Ui, view: &PlanView, id: NodeId, open: &mut bool) 
     });
 }
 
-/// The detail panel with no step selected: the plan-wide figures, the triggers PostgreSQL ran,
-/// and every plan-wide value as the server reported it.
 pub(super) fn plan_summary(ui: &mut Ui, view: &PlanView, open: &mut bool) {
     let p = palette(ui);
     let Some(plan) = view.plan() else { return };

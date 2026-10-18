@@ -19,7 +19,6 @@ use detail::{detail, fmt_fact, plan_summary, stands_out};
 mod detail;
 mod tree;
 
-/// What a Plan pane shows.
 pub enum PlanContent {
     Tree(Box<Plan>),
     /// The server's output when no parser reads its format, and why.
@@ -30,7 +29,6 @@ pub enum PlanContent {
 }
 
 impl PlanContent {
-    /// The output of an Explain action: a tree when a parser reads it, otherwise the raw text.
     pub fn explained(server: &ServerInfo, rows: &ResultSet, format: PlanFormat) -> Self {
         match plan::parse(server, rows) {
             Some(Ok(plan)) => PlanContent::Tree(Box::new(plan)),
@@ -49,7 +47,6 @@ impl PlanContent {
     }
 }
 
-/// Which picture of the plan the pane shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Tree,
@@ -58,7 +55,6 @@ enum Mode {
     Raw,
 }
 
-/// Derived numbers per node, computed once when the plan arrives.
 struct Metrics {
     inclusive_ms: Option<f64>,
     self_ms: Option<f64>,
@@ -72,14 +68,12 @@ struct Metrics {
 }
 
 impl Metrics {
-    /// The steps below cost more than this step counts, as MySQL's steps above a temporary table
-    /// do, so its bar spans them.
+    /// The steps below cost more than this step counts, as above a MySQL temporary table.
     fn spans_below(&self) -> bool {
         self.cost_span > self.cost.unwrap_or(0.0) * SPAN_SLACK
     }
 }
 
-/// What a click or key in the graph or flame chart asks of the pane.
 pub enum PlanEvent {
     Select(NodeId),
     CloseDetail,
@@ -111,18 +105,14 @@ pub struct PlanView {
     metrics: Vec<Metrics>,
     /// Bar length for 100%: the statement's time, or without actuals what the whole plan costs.
     scale: f64,
-    /// Some step's cost bar spans steps below that cost more than the step counts.
     cost_below: bool,
     selected: Option<NodeId>,
     detail_open: bool,
     scroll_to_selected: bool,
     scroll_id: Option<Id>,
-    /// When the tree was first drawn; its bars grow in from there.
     shown_at: Option<Instant>,
     /// `None` when no step was timed.
     flame: Option<Flame>,
-    /// Plan-wide figures, such as planning time; the detail panel summarizes them when no step is
-    /// selected.
     facts: Vec<PlanFact>,
 }
 
@@ -222,7 +212,7 @@ impl PlanView {
         self.rebuild_visible();
     }
 
-    /// Expands or collapses every step with children; collapsing keeps the root open.
+    /// Collapsing keeps the root open.
     pub fn set_all_collapsed(&mut self, collapsed: bool) {
         let Some(plan) = self.plan() else { return };
         let parents: Vec<bool> = plan.nodes().map(|(id, _)| !plan.children(id).is_empty()).collect();
@@ -259,7 +249,6 @@ impl PlanView {
         }
     }
 
-    /// Unfolds the selected step's ancestors and scrolls to it, after another view moved the selection.
     fn reveal_selected(&mut self) {
         let Some((plan, sel)) = self.plan().zip(self.selected) else { return };
         let ancestors: Vec<NodeId> = std::iter::successors(plan.parent(sel), |n| plan.parent(*n)).collect();
@@ -270,7 +259,6 @@ impl PlanView {
         self.scroll_to_selected = true;
     }
 
-    /// Selects the `index`th visible row and opens its details.
     pub fn select_row(&mut self, index: usize) {
         if let Some(id) = self.visible.get(index.min(self.visible.len().saturating_sub(1))) {
             self.selected = Some(*id);
@@ -280,7 +268,6 @@ impl PlanView {
     }
 }
 
-/// Draws the pane.
 pub fn show(ui: &mut Ui, id: Id, view: &mut PlanView) {
     let p = palette(ui);
     toolbar(ui, id, view, p);
@@ -381,9 +368,7 @@ fn text_button(ui: &mut Ui, text: &str) -> egui::Response {
     resp
 }
 
-/// `Planning 0.42 ms · Execution 3.91 ms`, with JIT and trigger time that stands out in the
-/// warning colour. Ordinary figures give way first when the toolbar is narrow. Clicking it shows
-/// the plan's details.
+/// `Planning 0.42 ms · Execution 3.91 ms`. Ordinary figures give way first when the toolbar is narrow.
 fn facts_button(ui: &mut Ui, facts: &[PlanFact], p: &Palette) -> egui::Response {
     let job = |shown: &[&PlanFact]| {
         let mut job = LayoutJob::default();

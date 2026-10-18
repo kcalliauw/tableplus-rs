@@ -1,8 +1,6 @@
-//! The Plan pane's graph view, in the style of MySQL Workbench's Visual Explain: one box per step,
+//! The Plan pane's graph, in the style of MySQL Workbench's Visual Explain: one box per step,
 //! coloured by how it reads its table, joins as diamonds, and edges as wide as the rows flowing up
-//! them to the result at the top. Drag or scroll to pan, ⌘-scroll or pinch to zoom at the
-//! pointer, arrows to walk the tree. The layout is computed once per plan and collapse state; a
-//! frame paints only the steps inside the view.
+//! them. A frame paints only the steps inside the view.
 
 mod layout;
 mod paint;
@@ -34,18 +32,15 @@ const TEXT_ZOOM: f32 = 0.36;
 const OPEN_ZOOM: f32 = 0.5;
 const MOVE_SECONDS: f32 = 0.3;
 const MARGIN: f32 = 28.0;
-/// Room kept free along the bottom for the legend and the zoom controls.
 const OVERLAY_H: f32 = 40.0;
 /// The join diamond's centre below the top of its slot, and its half-diagonal.
 const DIAMOND_Y: f32 = 21.0;
 const DIAMOND_R: f32 = 20.0;
-/// The `Result` cap above the root.
 const CAP_GAP: f32 = 40.0;
 const CAP_H: f32 = 26.0;
 
 #[derive(Clone, Copy)]
 struct Camera {
-    /// The graph point at the centre of the canvas.
     center: Pos2,
     zoom: f32,
 }
@@ -64,13 +59,12 @@ impl Camera {
     }
 }
 
-/// A camera move animated from `from` to `to`, zooming at a constant rate.
+/// A camera move that zooms at a constant rate.
 #[derive(Clone, Copy)]
 struct Flight {
     from: Camera,
     to: Camera,
-    /// A point on screen, from the canvas centre, that stays over the same graph point all the
-    /// way: where a zoom happens. Without one the view glides straight to `to`.
+    /// Where a zoom happens, from the canvas centre; it stays over the same graph point.
     pivot: Option<Vec2>,
     start: f64,
     seconds: f32,
@@ -102,7 +96,6 @@ struct Motion {
     start: f64,
 }
 
-/// The graph's state in a Plan pane: its cached layout, camera and folded steps.
 pub struct GraphView {
     prepared: Option<Prepared>,
     collapsed: Vec<bool>,
@@ -145,8 +138,6 @@ impl GraphView {
         self.flight = Some(Flight { from: self.camera, to, pivot: None, start: now, seconds });
     }
 
-    /// Zooms to `zoom` over a moment, keeping the graph point under `pivot` (from the canvas
-    /// centre) in place.
     fn zoom_to(&mut self, zoom: f32, pivot: Vec2, now: f64) {
         let from = self.camera;
         let zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
@@ -168,7 +159,6 @@ impl GraphView {
         }
     }
 
-    /// Where the camera is headed: the end of the current flight, or where it is.
     fn target(&self) -> Camera {
         self.flight.map_or(self.camera, |f| f.to)
     }
@@ -180,8 +170,7 @@ impl GraphView {
         Camera { center: bounds.center() + vec2(0.0, OVERLAY_H / 2.0 / zoom), zoom }
     }
 
-    /// The first view: the whole plan when it is readable that way, otherwise the selected step
-    /// or the top of the plan, where its result comes out.
+    /// The whole plan when it is readable that way, else the selected step or the top of the plan.
     fn opening(&self, canvas: Rect, selected: Option<NodeId>) -> Camera {
         let fit = self.fit(canvas);
         let Some(prepared) = &self.prepared else { return fit };
@@ -230,8 +219,7 @@ impl GraphView {
         self.camera = Camera { center: g - (at - canvas.center()) / zoom, zoom };
     }
 
-    /// Folds or unfolds `node`, keeping it in place on screen while the other boxes glide. True
-    /// when the fold hides `selected`.
+    /// Keeps `node` in place on screen while the others glide. True when the fold hides `selected`.
     fn toggle(&mut self, plan: &Plan, node: NodeId, now: f64, selected: Option<NodeId>) -> bool {
         if plan.children(node).is_empty() {
             return false;
@@ -283,7 +271,7 @@ impl GraphView {
     }
 }
 
-/// A box shaped like `like` but smaller, centred on `at`: where folded boxes come from and go.
+/// Where folded boxes come from and go: a smaller box centred on `at`.
 fn shrunk(at: Rect, like: Rect) -> Rect {
     Rect::from_center_size(at.center(), like.size() * 0.3)
 }
@@ -292,10 +280,8 @@ fn ease_out(t: f32) -> f32 {
     1.0 - (1.0 - t).powi(3)
 }
 
-/// Workbench's colours: red for a full table scan, red-orange for a full index scan, orange for a
-/// range, green for key lookups and blue for a constant row. Reading back a temporary result
-/// gets a muted violet instead of Workbench's red: no index can make that read cheaper, so red
-/// would point at a step the user can't change.
+/// Workbench's colours, but reading back a temporary result is a muted violet instead of red: no
+/// index can make that read cheaper, so red would point at a step the user can't change.
 pub(crate) fn access_color(access: Access, dark: bool) -> Color32 {
     let (light, night) = match access {
         Access::FullScan => (0xE5484D, 0xFF6369),
@@ -317,8 +303,7 @@ fn graph_bounds(layout: &Layout) -> Rect {
     layout.bounds.union(cap_rect(layout.rect(NodeId::ROOT).unwrap_or(Rect::ZERO)))
 }
 
-/// Draws the graph and handles its input. `selected` and `detail_open` are shared with the tree,
-/// so either view picks up where the other left off.
+/// Draws the graph and returns what the user picked.
 pub fn show(
     ui: &mut Ui,
     id: Id,
@@ -532,7 +517,6 @@ pub fn show(
     events
 }
 
-/// Zoom out, the zoom level (click for 100%), zoom in and fit to view, bottom right.
 fn controls(ui: &mut Ui, id: Id, canvas: Rect, view: &mut GraphView, now: f64) {
     let p = palette(ui);
     let zoom = view.target().zoom;
@@ -580,8 +564,7 @@ fn controls(ui: &mut Ui, id: Id, canvas: Rect, view: &mut GraphView, now: f64) {
     }
 }
 
-/// Arrows walk the tree: Up to the parent, Down to the first input, Left and Right along the
-/// row. Enter or Space folds, Escape closes the details and then clears the selection.
+/// Arrows walk the tree, Enter or Space folds, and Esc closes the details, then clears the selection.
 fn keyboard(
     ui: &mut Ui,
     plan: &Plan,
@@ -726,6 +709,7 @@ mod tests {
         assert!((after.center() - before.center()).length() < 0.01, "the folded step stays where it was");
     }
 
+    // Each layout size rasterizes the font again, so a zoom gesture must pass through only a few.
     #[test]
     fn a_moving_zoom_lays_text_out_at_few_sizes() {
         let zooms = (0..200).map(|i| TEXT_ZOOM + i as f32 * (MAX_ZOOM - TEXT_ZOOM) / 199.0);

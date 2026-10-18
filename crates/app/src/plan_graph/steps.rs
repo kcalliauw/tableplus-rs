@@ -1,5 +1,4 @@
-//! What each step of the graph shows, worked out once per plan and collapse state: its numbers
-//! and labels, the rows on its edge, and the legend's access classes.
+//! What each step of the graph shows, worked out once per plan and collapse state.
 
 use tableplus_core::plan::{Access, Extra, NodeId, Plan, SPAN_SLACK};
 
@@ -7,7 +6,6 @@ use super::layout::Layout;
 use super::paint::legend_class;
 use crate::widgets::{fmt_count, fmt_ms, fmt_rows};
 
-/// What a step shows, worked out once per plan.
 pub(super) struct Step {
     pub(super) access: Option<Access>,
     pub(super) join: bool,
@@ -19,8 +17,7 @@ pub(super) struct Step {
     pub(super) loops: Option<String>,
     /// Time including the steps below, or the estimated cost.
     pub(super) value: Option<String>,
-    /// Share of the statement's time with and without the steps below; without actuals, share of
-    /// the plan's cost with the steps below the step doesn't count, and its own.
+    /// Share of the statement's time with and without the steps below, or of the plan's cost.
     pub(super) bar: Option<(f32, f32)>,
     /// `Estimated 1,616 rows, cost 757`, for the tooltip.
     pub(super) estimate: Option<String>,
@@ -38,7 +35,6 @@ pub(super) struct Prepared {
     pub(super) analyzed: bool,
     /// `20 rows · 9.38 ms`, on the cap above the root.
     pub(super) result: String,
-    /// The access classes in this plan, for the legend.
     pub(super) legend: Vec<Access>,
     pub(super) has_joins: bool,
 }
@@ -115,9 +111,8 @@ pub(super) fn rows_text(rows: f64) -> String {
     format!("{} {}", fmt_rows(rows), if rows == 1.0 { "row" } else { "rows" })
 }
 
-/// Rows a step passes up over all its loops, or its estimate per loop. A step without numbers,
-/// such as MySQL's `Hash`, passes on what its children produce. A step MySQL marks as not
-/// estimated carries no number: the steps below a limit say nothing about what it returns.
+/// Rows a step passes up over all its loops, or its estimate. A step without numbers, such as
+/// `Hash`, passes on its children's; a step MySQL left unestimated, such as a limit, has none.
 pub(super) fn flow(plan: &Plan, id: NodeId, analyzed: bool) -> Option<f64> {
     let node = plan.node(id);
     let own =

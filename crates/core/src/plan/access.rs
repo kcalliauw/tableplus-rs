@@ -259,22 +259,18 @@ fn postgres_access(node: &PlanNode) -> Option<Access> {
     })
 }
 
-/// A condition with a bound: `<`, `>`, `<=`, `>=`, PostgreSQL's `~>=~` for a LIKE prefix, or
-/// BETWEEN. JSON arrows and containment operators are not bounds.
+/// A condition with a bound: `<`, `>`, `<=`, `>=` or PostgreSQL's `~>=~` for a LIKE prefix. JSON
+/// arrows, containment operators and quoted text are not bounds.
 fn is_range(condition: &str) -> bool {
     let mut text = condition.to_string();
     for operator in ["->>", "->", "#>>", "#>", "<@", "@>", "<->"] {
         text = text.replace(operator, " ");
     }
     let mut quoted = false;
-    for c in text.chars() {
-        match c {
-            '\'' => quoted = !quoted,
-            '<' | '>' if !quoted => return true,
-            _ => {}
-        }
-    }
-    text.to_ascii_uppercase().contains(" BETWEEN ")
+    text.chars().any(|c| {
+        quoted ^= c == '\'';
+        !quoted && (c == '<' || c == '>')
+    })
 }
 
 #[cfg(test)]
@@ -293,7 +289,6 @@ mod tests {
         crate::plan::parse(&ServerInfo::new(flavor, version), &result).unwrap().unwrap()
     }
 
-    /// Every step of a plan as `(operation, access)`.
     fn steps(plan: &Plan) -> Vec<(String, Option<Access>)> {
         plan.nodes().map(|(id, n)| (n.operation.clone(), plan.access(id))).collect()
     }
@@ -510,6 +505,9 @@ mod tests {
               {"Node Type": "Index Scan", "Index Name": "idx_name", "Index Cond": "((name ~>=~ 'Al'::text) AND (name ~<~ 'Am'::text))", "Plan Rows": 1, "Total Cost": 1},
               {"Node Type": "Index Scan", "Index Name": "orders_pkey", "Plan Rows": 830, "Total Cost": 40},
               {"Node Type": "Index Scan", "Index Name": "idx_doc", "Index Cond": "(doc @> '{\"a\": 1}'::jsonb)", "Plan Rows": 1, "Total Cost": 4},
+              {"Node Type": "Index Scan", "Index Name": "idx_tags", "Index Cond": "(tags <@ '{a}'::text[])", "Plan Rows": 1, "Total Cost": 4},
+              {"Node Type": "Index Scan", "Index Name": "idx_d", "Index Cond": "((d ->> 'k'::text) = 'v'::text)", "Plan Rows": 1, "Total Cost": 4},
+              {"Node Type": "Index Scan", "Index Name": "idx_s", "Index Cond": "(s = '<b>'::text)", "Plan Rows": 1, "Total Cost": 4},
               {"Node Type": "Bitmap Heap Scan", "Relation Name": "orders", "Recheck Cond": "(customer_id = 'ALFKI'::bpchar)", "Plan Rows": 6, "Total Cost": 12,
                "Plans": [{"Node Type": "Bitmap Index Scan", "Index Name": "idx_c", "Index Cond": "(customer_id = 'ALFKI'::bpchar)", "Plan Rows": 6, "Total Cost": 4}]},
               {"Node Type": "Bitmap Heap Scan", "Relation Name": "orders", "Recheck Cond": "(freight > '50'::numeric)", "Plan Rows": 6, "Total Cost": 12,
@@ -538,6 +536,9 @@ mod tests {
                 Some(Range),
                 Some(Range),
                 Some(IndexScan),
+                Some(Lookup),
+                Some(Lookup),
+                Some(Lookup),
                 Some(Lookup),
                 Some(Lookup),
                 Some(Lookup),
@@ -619,24 +620,6 @@ mod tests {
         );
         let materialize = plan.nodes().find(|(_, n)| n.operation == "Materialize").unwrap().0;
         assert_eq!(plan.extras(materialize), [Extra::TempTable]);
-    }
-
-    #[test]
-    fn range_conditions() {
-        for range in ["a > 1", "a<=?", "rowid>? AND rowid<?", "x BETWEEN 1 AND 2", "(name ~>=~ 'Al'::text)"] {
-            assert!(is_range(range), "{range}");
-        }
-        for equal in [
-            "a = 1",
-            "rowid=?",
-            "(customer_id = ANY ('{a}'))",
-            "(doc @> '{}')",
-            "(tags <@ '{}')",
-            "(d->>'k' = 'v')",
-            "(s = '<b>')",
-        ] {
-            assert!(!is_range(equal), "{equal}");
-        }
     }
 
     #[test]

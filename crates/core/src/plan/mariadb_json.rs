@@ -6,21 +6,15 @@
 //!
 //! # Timing
 //!
-//! Every MariaDB time is a total over all of a step's loops. The server's trackers sum their
-//! cycles without dividing by the loop count, and the documentation calls `r_total_time_ms` "how
-//! much time in total" was spent. What a step's time covers differs by step:
+//! Every MariaDB time is a total over all of a step's loops: the [documentation][analyze] calls
+//! `r_total_time_ms` the time spent "in total", and the [trackers][trackers] add up cycles without
+//! dividing by the loop count. A query block's time covers everything below it. A table's
+//! `r_table_time_ms` plus `r_other_time_ms` is its own work, and a sort's time leaves out a
+//! temporary table the join filled before it. Each step's total, children included, is divided by
+//! its `r_loops` to give the model's time per loop.
 //!
-//! - A query block's `r_total_time_ms` spans `JOIN::exec`, so it covers everything below it.
-//! - A table's `r_table_time_ms` (storage engine calls) plus `r_other_time_ms` (the gap after
-//!   each call, such as checking its condition) is its own work. A derived table or subquery it
-//!   materializes is timed by its own query block, so that block's time is added on top.
-//! - A sort's `r_total_time_ms` covers the table it reads directly, but not a temporary table:
-//!   the join fills that before the sort starts, so the join's time is added on top.
-//!
-//! The model wants a time per loop that includes the children, so each step's total over its
-//! loops, children included, is divided by its `r_loops`. MariaDB reports no first-row time.
-//! Because `r_other_time_ms` is billed by gaps between timers, the parts of a block can add up
-//! to slightly more than the block's own total; the block's self time then stays at zero.
+//! [analyze]: https://mariadb.com/kb/en/analyze-format-json/
+//! [trackers]: https://github.com/MariaDB/server/blob/main/sql/sql_analyze_stmt.h
 
 use std::fmt;
 

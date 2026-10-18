@@ -10,6 +10,7 @@ use common::*;
 use tableplus_core::config::SslMode;
 use tableplus_core::driver;
 use tableplus_core::model::{ConstraintKind, ObjectKind};
+use tableplus_core::plan::ExplainMode;
 use tableplus_core::sqlgen::{self, Filter, FilterOp, SortKey};
 use tableplus_core::{Flavor, StatementResult, Value};
 
@@ -206,6 +207,10 @@ async fn mysql_explain_plans() {
         return;
     };
     exercise_explain(&conn, JOIN, "UPDATE orders SET total = 0", "SELECT COUNT(*), SUM(total) FROM orders").await;
+    conn.query("SET explain_json_format_version = 1", None).await.unwrap();
+    explain(&conn, JOIN, ExplainMode::Analyze).await;
+    let version = driver::scalar(conn.as_ref(), "SELECT @@SESSION.explain_json_format_version").await.unwrap();
+    assert_eq!(version.as_deref(), Some("1"), "the session's own JSON format is put back");
     exercise_read_only_explain(
         &conn,
         "SELECT SLEEP(0.5)",

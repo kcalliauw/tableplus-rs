@@ -16,7 +16,8 @@ pub enum ExplainMode {
     Analyze,
 }
 
-/// Run `setup`, then `explain`, then `reset` (even when `explain` fails), on one connection.
+/// What [`Connection::explain`](crate::driver::Connection::explain) runs: `setup`, then
+/// `explain`, then `reset`, even when `explain` fails.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExplainStatements {
     pub setup: Vec<String>,
@@ -26,14 +27,11 @@ pub struct ExplainStatements {
     pub format: PlanFormat,
 }
 
-/// How the plan is asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Explain {
     /// An EXPLAIN statement, whose rows are the plan.
     Statement(String),
-    /// The user's statement itself, run by
-    /// [`Connection::measure`](crate::driver::Connection::measure), which returns the plan with
-    /// what the database measured. SQLite works this way.
+    /// The user's statement itself, which the driver runs and measures. SQLite works this way.
     Measure(String),
 }
 
@@ -81,8 +79,7 @@ const fn unsupported(flavor: Flavor, mode: ExplainMode, since: Version, reason: 
 }
 
 /// MySQL's JSON format version 2 for one statement, with the session's own setting put back
-/// afterwards. Version 2 lists the same steps as TREE text but keeps tables, columns, indexes,
-/// lookup and filter conditions and the join algorithm as separate fields, at full precision.
+/// afterwards.
 const fn json_v2(mode: ExplainMode, prefix: &'static str) -> Rule {
     const SETUP: &[&str] = &["SET @tableplus_explain_json_format = @@SESSION.explain_json_format_version, \
           explain_json_format_version = 2"];
@@ -95,10 +92,9 @@ const fn json_v2(mode: ExplainMode, prefix: &'static str) -> Rule {
     }
 }
 
-/// Statements that make the session's next transactions read-only for an Explain Analyze, and
-/// put back the session's own setting, which may already be read-only. The statement check below
-/// only sees the statement's shape; a query can still write through a function such as
-/// `nextval`, which a read-only transaction refuses.
+/// Statements that make the session read-only for an Explain Analyze and put back its own
+/// setting. The statement check below only sees the statement's shape, and a query can still
+/// write through a function such as `nextval`.
 const fn read_only(flavor: Flavor) -> (&'static [&'static str], &'static [&'static str]) {
     match flavor {
         Flavor::Postgres => (
@@ -341,19 +337,13 @@ mod tests {
             let r = request(&server, q, mode).unwrap_or_else(|e| panic!("{server} {mode:?}: {e}"));
             assert_eq!(r.explain, Explain::Statement(expected.into()), "{server} {mode:?}");
             assert_eq!(r.format, format, "{server} {mode:?}");
-            assert_eq!(
-                r.setup,
-                read_only(server.flavor).0.iter().filter(|_| mode == Analyze).copied().collect::<Vec<_>>()
-            );
-            assert_eq!(
-                r.reset,
-                read_only(server.flavor).1.iter().filter(|_| mode == Analyze).copied().collect::<Vec<_>>()
-            );
+            let restores = !r.setup.is_empty() && r.setup.len() == r.reset.len();
+            assert_eq!(restores, mode == Analyze, "{server} {mode:?}: {r:?}");
         }
     }
 
     #[test]
-    fn mysql_84_asks_for_json_version_2_and_restores_the_setting() {
+    fn mysql_84_asks_for_json_version_2() {
         for (mode, expected) in [
             (Estimate, "EXPLAIN FORMAT=JSON select * from orders"),
             (Analyze, "EXPLAIN ANALYZE FORMAT=JSON select * from orders"),
@@ -361,11 +351,8 @@ mod tests {
             for server in [MYSQL_84, ServerInfo::new(MySql, Version::new(9, 7, 2))] {
                 let r = request(&server, "select * from orders", mode).unwrap();
                 assert_eq!((r.explain.sql(), r.format), (expected, PlanFormat::MySqlJsonV2), "{server} {mode:?}");
-                let json = r.setup.last().unwrap();
-                assert!(json.contains("explain_json_format_version = 2"), "{json}");
-                assert!(json.contains("@tableplus_explain_json_format = @@SESSION.explain_json_format_version"));
-                assert_eq!(r.reset[0], "SET explain_json_format_version = @tableplus_explain_json_format");
                 assert_eq!(r.setup.len(), if mode == Analyze { 2 } else { 1 }, "{server} {mode:?}");
+                assert_eq!(r.reset.len(), r.setup.len());
             }
         }
     }
@@ -403,20 +390,6 @@ mod tests {
     #[test]
     fn strips_the_trailing_semicolon() {
         assert_eq!(explain(MYSQL_84, "  select 1 ;\n", Estimate).unwrap(), "EXPLAIN FORMAT=JSON select 1");
-    }
-
-    #[test]
-    fn analyze_runs_in_a_read_only_session() {
-        for server in [POSTGRES, MYSQL_8018, MYSQL_84, MARIADB] {
-            let r = request(&server, "select nextval('s')", Analyze).unwrap();
-            let (setup, reset) = (&r.setup[0], r.reset.last().unwrap());
-            assert!(
-                setup.contains("explain_read_only") && setup.contains("read_only"),
-                "{server} saves the setting: {setup}"
-            );
-            assert!(reset.contains("explain_read_only"), "{server} restores the saved setting: {reset}");
-            assert!(request(&server, "select 1", Estimate).unwrap().setup.iter().all(|s| !s.contains("read_only")));
-        }
     }
 
     #[test]

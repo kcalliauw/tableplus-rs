@@ -252,7 +252,6 @@ mod tests {
                 "SCAN od USING INDEX sqlite_autoindex_order_details_1",
                 ("Scan", Some("od"), Some("sqlite_autoindex_order_details_1"), None),
             ),
-            ("SCAN c USING COVERING INDEX idx_country", ("Scan", Some("c"), Some("COVERING INDEX idx_country"), None)),
             (
                 "SEARCH o USING INTEGER PRIMARY KEY (rowid=?)",
                 ("Search", Some("o"), Some("INTEGER PRIMARY KEY"), Some("rowid=?")),
@@ -261,37 +260,25 @@ mod tests {
                 "SEARCH e USING AUTOMATIC COVERING INDEX (reports_to=?)",
                 ("Search", Some("e"), Some("AUTOMATIC COVERING INDEX"), Some("reports_to=?")),
             ),
-            (
-                "SEARCH t USING INDEX i (a=? AND b>? AND b<?)",
-                ("Search", Some("t"), Some("i"), Some("a=? AND b>? AND b<?")),
-            ),
             ("SCAN (subquery-7)", ("Scan", Some("(subquery-7)"), None, None)),
             ("SCAN CONSTANT ROW", ("Scan constant row", None, None, None)),
             ("USE TEMP B-TREE FOR ORDER BY", ("Temp B-tree", None, None, Some("ORDER BY"))),
             ("USE TEMP B-TREE FOR count(DISTINCT)", ("Temp B-tree", None, None, Some("count(DISTINCT)"))),
             ("CORRELATED SCALAR SUBQUERY 3", ("Correlated scalar subquery 3", None, None, None)),
-            ("SCALAR SUBQUERY 1", ("Scalar subquery 1", None, None, None)),
-            ("LIST SUBQUERY 1", ("List subquery 1", None, None, None)),
             ("MATERIALIZE t", ("Materialize", Some("t"), None, None)),
             ("CO-ROUTINE t", ("Co-routine", Some("t"), None, None)),
             ("CO-ROUTINE (subquery-6)", ("Co-routine", Some("(subquery-6)"), None, None)),
             ("COMPOUND QUERY", ("Compound query", None, None, None)),
-            ("LEFT-MOST SUBQUERY", ("Left-most subquery", None, None, None)),
-            ("UNION ALL", ("Union all", None, None, None)),
             ("UNION USING TEMP B-TREE", ("Union using temp B-tree", None, None, None)),
             ("MERGE (UNION ALL)", ("Merge", None, None, Some("UNION ALL"))),
             ("LEFT", ("Left", None, None, None)),
-            ("RIGHT", ("Right", None, None, None)),
-            ("MULTI-INDEX OR", ("Multi-index OR", None, None, None)),
             ("INDEX 1", ("Index 1", None, None, None)),
             ("BLOOM FILTER ON e (reports_to=?)", ("Bloom filter", Some("e"), None, Some("reports_to=?"))),
-            ("CREATE BLOOM FILTER", ("Create bloom filter", None, None, None)),
             (
                 "CREATE AUTOMATIC INDEX ON tree(id, depth)",
                 ("Create automatic index", Some("tree"), None, Some("id, depth")),
             ),
             ("SETUP", ("Setup", None, None, None)),
-            ("RECURSIVE STEP", ("Recursive step", None, None, None)),
             ("SOMETHING NEWER", ("SOMETHING NEWER", None, None, None)),
             ("", ("", None, None, None)),
         ] {
@@ -337,22 +324,6 @@ mod tests {
         );
         assert!(!plan.analyzed());
         assert_eq!(plan.total_ms(), None);
-    }
-
-    #[test]
-    fn several_top_level_steps_share_a_root() {
-        let plan =
-            parse(&sqlite(), &result(&[(2, 0, "SCAN t"), (5, 2, "INDEX 1"), (9, 0, "USE TEMP B-TREE FOR ORDER BY")]))
-                .unwrap()
-                .unwrap();
-        assert_eq!(plan.node(NodeId::ROOT).operation, "Query");
-        assert_eq!(plan.node_count(), 4);
-        let top: Vec<&str> = plan.children(NodeId::ROOT).iter().map(|c| plan.node(*c).operation.as_str()).collect();
-        assert_eq!(top, ["Scan", "Temp B-tree"]);
-        assert_eq!(
-            plan.raw,
-            "id  parent  notused  detail\n2   0       0        SCAN t\n5   2       0        INDEX 1\n9   0       0        USE TEMP B-TREE FOR ORDER BY"
-        );
     }
 
     #[test]

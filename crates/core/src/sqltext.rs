@@ -254,11 +254,11 @@ pub fn tokenize(src: &str, dialect: Dialect) -> Vec<Token> {
                 i += c.len_utf8();
             }
             TokenKind::Whitespace
-        } else if src[i..].starts_with("--") || (dialect == Dialect::MySql && c == '#') {
+        } else if line_comment(src, i, dialect) {
             i = src[i..].find('\n').map_or(len, |p| i + p);
             TokenKind::Comment
         } else if src[i..].starts_with("/*") {
-            i = src[i + 2..].find("*/").map_or(len, |p| i + 2 + p + 2);
+            i = block_comment_end(src, i, dialect);
             TokenKind::Comment
         } else if c == '\'' || (dialect == Dialect::MySql && c == '"') {
             i = scan_quoted(src, i, c, dialect == Dialect::MySql);
@@ -316,6 +316,43 @@ pub fn tokenize(src: &str, dialect: Dialect) -> Vec<Token> {
         tokens.push(Token { kind, start, end: i });
     }
     tokens
+}
+
+/// MySQL starts a `--` comment only before whitespace or a control character; `1 --1` is
+/// arithmetic there.
+fn line_comment(src: &str, i: usize, dialect: Dialect) -> bool {
+    match dialect {
+        Dialect::MySql => {
+            src[i..].starts_with('#')
+                || (src[i..].starts_with("--")
+                    && src[i + 2..].chars().next().is_none_or(|c| c.is_whitespace() || c.is_control()))
+        }
+        _ => src[i..].starts_with("--"),
+    }
+}
+
+/// The end of the block comment that opens at `open`. PostgreSQL nests them.
+fn block_comment_end(src: &str, open: usize, dialect: Dialect) -> usize {
+    let bytes = src.as_bytes();
+    let mut depth = 0usize;
+    let mut i = open;
+    while i + 1 < bytes.len() {
+        match (bytes[i], bytes[i + 1]) {
+            (b'/', b'*') if depth == 0 || dialect == Dialect::Postgres => {
+                depth += 1;
+                i += 2;
+            }
+            (b'*', b'/') => {
+                depth -= 1;
+                i += 2;
+                if depth == 0 {
+                    return i;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    src.len()
 }
 
 fn scan_quoted(src: &str, open: usize, quote: char, backslash_escapes: bool) -> usize {
@@ -533,6 +570,16 @@ mod tests {
         assert_eq!(texts("select 'a\\'b;'; select 2", Dialect::MySql), vec!["select 'a\\'b;'", "select 2"]);
         assert_eq!(texts("select \"x;y\" from t", Dialect::Sqlite), vec!["select \"x;y\" from t"]);
         assert_eq!(texts("/* a; b */ select 1", Dialect::Sqlite), vec!["select 1"]);
+    }
+
+    #[test]
+    fn split_follows_each_servers_comments() {
+        assert_eq!(texts("select 1 --1 ; delete from t", Dialect::MySql), vec!["select 1 --1", "delete from t"]);
+        assert_eq!(texts("select 1 -- c ; delete from t", Dialect::MySql), vec!["select 1"]);
+        assert_eq!(texts("select 1 --1 ; delete from t", Dialect::Postgres), vec!["select 1"]);
+        let nested = "/* /* */ select 1 */ delete from t; select 2";
+        assert_eq!(texts(nested, Dialect::Postgres), vec!["delete from t", "select 2"]);
+        assert_eq!(texts("/* /* */ select 1", Dialect::MySql), vec!["select 1"]);
     }
 
     #[test]

@@ -4,7 +4,7 @@
 
 use crate::dialect::Dialect;
 use crate::server::{Flavor, ServerInfo, Version};
-use crate::sqltext::{Token, TokenKind, tokenize, trim_statement};
+use crate::sqltext::{Token, TokenKind, split_statements, tokenize, trim_statement};
 
 use super::PlanFormat;
 
@@ -137,12 +137,30 @@ const RULES: &[Rule] = &[
     },
 ];
 
+/// Whether running `sql` asks `server` for a plan, as a hand-typed `EXPLAIN` does.
+pub fn asks_for_plan(server: &ServerInfo, sql: &str) -> bool {
+    StatementShape::read(trim_statement(sql), server.flavor.dialect()).asks_for_plan(server.flavor)
+}
+
 /// The statements that explain `sql` on `server`.
 pub fn request(server: &ServerInfo, sql: &str, mode: ExplainMode) -> Result<ExplainStatements, Unsupported> {
     let sql = trim_statement(sql);
-    let shape = StatementShape::read(sql, server.flavor.dialect());
-    if shape.verb == "EXPLAIN" || shape.verb == "DESCRIBE" || (shape.verb == "ANALYZE" && server.flavor == MariaDb) {
+    let dialect = server.flavor.dialect();
+    // The server runs every statement in the text, and Explain wraps only the first.
+    if split_statements(sql, dialect).len() > 1 {
+        return Err(Unsupported("Explain takes one statement at a time.".into()));
+    }
+    let shape = StatementShape::read(sql, dialect);
+    if shape.asks_for_plan(server.flavor) {
         return Err(Unsupported("The statement already asks for a plan. Run it to see the plan.".into()));
+    }
+    if server.flavor == Sqlite && shape.word == "PRAGMA" {
+        return Err(Unsupported("SQLite applies a PRAGMA while preparing it, so explaining one would run it.".into()));
+    }
+    if mode == Analyze && shape.executable_comment {
+        return Err(Unsupported(
+            "Explain Analyze runs the statement, and it can't check what a /*! … */ comment adds to it.".into(),
+        ));
     }
     if mode == Analyze
         && let Some(write) = shape.writes()
@@ -185,13 +203,22 @@ pub fn request(server: &ServerInfo, sql: &str, mode: ExplainMode) -> Result<Expl
 struct StatementShape {
     /// The first keyword in capitals, or empty when the statement starts with something else.
     verb: String,
+    /// The first word in capitals, keyword or not.
+    word: String,
     cte_verbs: Vec<String>,
     select_into: bool,
+    /// A MySQL or MariaDB `/*! … */` comment, whose text the server runs as part of the statement.
+    executable_comment: bool,
 }
 
 impl StatementShape {
     fn read(sql: &str, dialect: Dialect) -> Self {
-        let tokens: Vec<Token> = tokenize(sql, dialect).into_iter().filter(|t| !t.is_trivia()).collect();
+        let all = tokenize(sql, dialect);
+        let executable_comment = dialect == Dialect::MySql
+            && all.iter().any(|t| {
+                t.kind == TokenKind::Comment && (t.text(sql).starts_with("/*!") || t.text(sql).starts_with("/*M!"))
+            });
+        let tokens: Vec<Token> = all.into_iter().filter(|t| !t.is_trivia()).collect();
         let word = |i: usize| tokens.get(i).map(|t| t.text(sql).to_ascii_uppercase()).unwrap_or_default();
         let punct = |i: usize, p: &str| tokens.get(i).is_some_and(|t| t.kind == TokenKind::Punct && t.text(sql) == p);
         let skip_parens = |mut i: usize| {
@@ -253,7 +280,7 @@ impl StatementShape {
             w => w,
         };
         let mut depth = 0usize;
-        let select_into = verb == "SELECT"
+        let select_into = matches!(verb.as_str(), "SELECT" | "TABLE")
             && tokens[i..].iter().any(|t| match (t.kind, t.text(sql)) {
                 (TokenKind::Punct, "(") => {
                     depth += 1;
@@ -266,7 +293,11 @@ impl StatementShape {
                 (TokenKind::Keyword, w) => depth == 0 && w.eq_ignore_ascii_case("INTO"),
                 _ => false,
             });
-        Self { verb, cte_verbs, select_into }
+        Self { verb, word: word(i), cte_verbs, select_into, executable_comment }
+    }
+
+    fn asks_for_plan(&self, flavor: Flavor) -> bool {
+        matches!(self.verb.as_str(), "EXPLAIN" | "DESCRIBE") || (self.verb == "ANALYZE" && flavor == MariaDb)
     }
 
     /// The keyword that makes running the statement change data, if it would.
@@ -404,12 +435,30 @@ mod tests {
             (SQLITE, "insert or replace into t values (1)", "INSERT"),
             (SQLITE, "replace into t values (1)", "REPLACE"),
             (SQLITE, "with x as (select 1) delete from t where a in (select * from x)", "DELETE"),
-            (SQLITE, "pragma user_version = 3", "statement"),
+            (MARIADB, "select 42 --1\n into outfile '/tmp/x'", "SELECT … INTO"),
+            (POSTGRES, "/* /* */ select 1 */ delete from t", "DELETE"),
+            (MYSQL_84, "table orders into @x", "SELECT … INTO"),
         ] {
             let err = explain(server, sql, Analyze).unwrap_err();
             assert!(err.contains(verb), "{sql}: {err}");
             assert!(explain(server, sql, Estimate).is_ok(), "{sql} still gets an estimate");
         }
+    }
+
+    #[test]
+    fn never_explains_what_runs_unseen() {
+        for (server, sql, mode, reason) in [
+            (MYSQL_84, "select 1 --1 ; insert into t values (1)", Estimate, "one statement"),
+            (MARIADB, "select 1 --1 ; insert into t values (1)", Analyze, "one statement"),
+            (MARIADB, "select 43 /*! into dumpfile '/tmp/x' */", Analyze, "/*!"),
+            (MARIADB, "select 44 /*M! into @v */", Analyze, "/*!"),
+            (SQLITE, "pragma foreign_keys = off", Estimate, "PRAGMA"),
+            (SQLITE, "PRAGMA query_only = 1", Analyze, "PRAGMA"),
+        ] {
+            let err = explain(server, sql, mode).unwrap_err();
+            assert!(err.contains(reason), "{sql}: {err}");
+        }
+        assert!(explain(MARIADB, "select 43 /*! straight_join */ from t", Estimate).is_ok());
     }
 
     #[test]

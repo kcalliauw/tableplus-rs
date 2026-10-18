@@ -13,7 +13,7 @@ mod sqlite_scanstatus;
 
 pub use access::{Access, Extra};
 pub use facts::{FactKind, FactValue, PlanFact, Trigger};
-pub use request::{Explain, ExplainMode, ExplainStatements, Unsupported, request};
+pub use request::{Explain, ExplainMode, ExplainStatements, Unsupported, asks_for_plan, request};
 pub(crate) use sqlite_scanstatus::{COLUMNS as SQLITE_SCAN_STATUS_COLUMNS, STATEMENT_ID as SQLITE_STATEMENT_ID};
 
 use crate::model::ResultSet;

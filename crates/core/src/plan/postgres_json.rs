@@ -29,8 +29,18 @@ pub(super) fn parse(server: &ServerInfo, result: &ResultSet) -> Option<Result<Pl
         .then(|| parse_text(text).map_err(|message| ParseError { format: PlanFormat::PostgresJson, message }))
 }
 
+/// JSON levels a plan may nest. serde_json stops at 128, which a join of about 90 tables passes;
+/// a debug build overflows a 2 MiB worker stack near 500.
+const MAX_DEPTH: usize = 256;
+
 fn parse_text(text: &str) -> Result<Plan, String> {
-    let statements: Vec<Object> = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    if json_depth(text) > MAX_DEPTH {
+        return Err(format!("the plan nests deeper than {MAX_DEPTH} levels"));
+    }
+    let mut json = serde_json::Deserializer::from_str(text);
+    json.disable_recursion_limit();
+    let statements: Vec<Object> = serde::Deserialize::deserialize(&mut json).map_err(|e| e.to_string())?;
+    json.end().map_err(|e| e.to_string())?;
     let mut plan = match statements.as_slice() {
         [] => return Err("the output holds no statement".into()),
         [one] => {
@@ -58,6 +68,25 @@ fn parse_text(text: &str) -> Result<Plan, String> {
         }
     }
     Ok(plan)
+}
+
+/// The deepest nesting of arrays and objects in `text`, outside strings.
+fn json_depth(text: &str) -> usize {
+    let (mut depth, mut deepest, mut in_string, mut escaped) = (0usize, 0, false, false);
+    for b in text.bytes() {
+        match b {
+            _ if escaped => escaped = false,
+            b'\\' if in_string => escaped = true,
+            b'"' => in_string = !in_string,
+            b'[' | b'{' if !in_string => {
+                depth += 1;
+                deepest = deepest.max(depth);
+            }
+            b']' | b'}' if !in_string => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    deepest
 }
 
 fn root_of(statement: &Object) -> Result<&Object, String> {
@@ -381,6 +410,20 @@ mod tests {
         assert!((plan.inclusive_ms(partial).unwrap() - 653.62).abs() < 1e-9);
         assert!(plan.inclusive_ms(partial) < plan.inclusive_ms(NodeId::ROOT));
         assert_eq!(plan.total_ms(), Some(681.482));
+    }
+
+    #[test]
+    fn deep_plans_parse_up_to_a_limit() {
+        let nested = |levels: usize| {
+            let open = r#"{"Node Type": "Limit", "Plans": ["#.repeat(levels);
+            let close = "]}".repeat(levels);
+            format!(r#"[{{"Plan": {open}{{"Node Type": "Result"}}{close}}}]"#)
+        };
+        let deep = parse_text(&nested(120)).expect("a 120-step plan parses");
+        assert_eq!(deep.node_count(), 121);
+        let err = parse_text(&nested(130)).unwrap_err();
+        assert!(err.contains("256 levels"), "{err}");
+        assert_eq!(json_depth(r#"{"a": "[{\"[", "b": [1]}"#), 2, "brackets in strings don't count");
     }
 
     #[test]

@@ -101,7 +101,7 @@ const fn json_v2(mode: ExplainMode, prefix: &'static str) -> Rule {
 /// PostgreSQL runs it in a transaction of its own that is rolled back. On MySQL and MariaDB,
 /// starting a transaction would release the session's `LOCK TABLES` locks, so the session's
 /// read-only and autocommit settings are saved and turned off instead: the statement opens a
-/// read-only transaction, and the rollback undoes what read-only allows, such as writes to
+/// read-only transaction, and the rollback undoes what read-only allows, such as writes to InnoDB
 /// temporary tables, whatever `completion_type` says. Both settings are put back afterwards.
 const fn read_only(flavor: Flavor) -> (&'static [&'static str], &'static [&'static str]) {
     match flavor {

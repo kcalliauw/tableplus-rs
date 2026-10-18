@@ -11,6 +11,7 @@ use eframe::egui::{
 };
 use tableplus_core::plan::{NodeId, Plan, SPAN_SLACK};
 
+use crate::plan_view::PlanEvent;
 use crate::theme::palette;
 use paint::{Look, header_strip, needs_times, paint_bar, tooltip};
 
@@ -59,13 +60,6 @@ struct Bar {
     /// MySQL averages over loops, so nested times don't always add up; MySQL 8.0.18 times a scan
     /// of a temporary table without the materialization below it, 4 µs over 6.6 ms of work.
     stretched: Option<f64>,
-}
-
-/// What a click or key in the chart asks of the pane.
-pub enum Pick {
-    Step(NodeId),
-    CloseDetail,
-    Clear,
 }
 
 /// The flame chart of one plan: bar geometry, computed once, and the zoom.
@@ -286,10 +280,10 @@ pub fn show(
     flame: Option<&mut Flame>,
     selected: Option<NodeId>,
     detail_open: bool,
-) -> Option<Pick> {
+) -> Vec<PlanEvent> {
     let Some(flame) = flame else {
         needs_times(ui, plan);
-        return None;
+        return Vec::new();
     };
     let p = palette(ui);
     flame.follow_selection(plan, selected);
@@ -426,7 +420,7 @@ pub fn show(
     match press {
         Some(Press::Click(node)) => {
             flame.clicked = node;
-            pick = node.map(Pick::Step).or(pick);
+            pick = node.map(PlanEvent::Select).or(pick);
         }
         Some(Press::Double) => {
             if let Some(node) = flame.clicked {
@@ -443,7 +437,7 @@ pub fn show(
     if pick.is_some() {
         ui.ctx().request_repaint();
     }
-    pick
+    pick.into_iter().collect()
 }
 
 enum Press {
@@ -453,7 +447,7 @@ enum Press {
 
 /// Arrows walk the bars, Enter zooms in, Home zooms all the way out, and Esc zooms out a step,
 /// then closes the details, then clears the selection.
-fn keyboard(ui: &Ui, plan: &Plan, flame: &mut Flame, selected: Option<NodeId>, detail_open: bool) -> Option<Pick> {
+fn keyboard(ui: &Ui, plan: &Plan, flame: &mut Flame, selected: Option<NodeId>, detail_open: bool) -> Option<PlanEvent> {
     let pressed: Vec<Key> = ui.input(|i| {
         [Key::ArrowUp, Key::ArrowDown, Key::ArrowLeft, Key::ArrowRight, Key::Enter, Key::Space, Key::Escape, Key::Home]
             .into_iter()
@@ -462,7 +456,7 @@ fn keyboard(ui: &Ui, plan: &Plan, flame: &mut Flame, selected: Option<NodeId>, d
     });
     let mut pick = None;
     for key in pressed {
-        let sel = if let Some(Pick::Step(n)) = pick { Some(n) } else { selected };
+        let sel = if let Some(PlanEvent::Select(n)) = pick { Some(n) } else { selected };
         let step = sel.and_then(|s| match key {
             Key::ArrowUp => plan.parent(s),
             Key::ArrowDown => {
@@ -474,7 +468,9 @@ fn keyboard(ui: &Ui, plan: &Plan, flame: &mut Flame, selected: Option<NodeId>, d
         });
         let arrow = matches!(key, Key::ArrowUp | Key::ArrowDown | Key::ArrowLeft | Key::ArrowRight);
         pick = match (key, sel) {
-            _ if arrow => sel.map_or(Some(Pick::Step(flame.camera.focus)), |_| step.map(Pick::Step).or(pick)),
+            _ if arrow => {
+                sel.map_or(Some(PlanEvent::Select(flame.camera.focus)), |_| step.map(PlanEvent::Select).or(pick))
+            }
             (Key::Enter | Key::Space, Some(s)) => {
                 flame.zoom_to(s);
                 pick
@@ -484,8 +480,8 @@ fn keyboard(ui: &Ui, plan: &Plan, flame: &mut Flame, selected: Option<NodeId>, d
                 pick
             }
             (Key::Escape, _) if flame.zoom_out(plan) => pick,
-            (Key::Escape, Some(_)) if detail_open => Some(Pick::CloseDetail),
-            (Key::Escape, Some(_)) => Some(Pick::Clear),
+            (Key::Escape, Some(_)) if detail_open => Some(PlanEvent::CloseDetail),
+            (Key::Escape, Some(_)) => Some(PlanEvent::Deselect),
             _ => pick,
         };
     }

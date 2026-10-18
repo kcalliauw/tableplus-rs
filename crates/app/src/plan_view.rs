@@ -9,7 +9,7 @@ use tableplus_core::model::ResultSet;
 use tableplus_core::plan::{self, Access, Extra, NodeId, Plan, PlanFact, PlanFormat, SPAN_SLACK};
 
 use crate::icons::Icon;
-use crate::plan_flame::{self, Flame, Pick};
+use crate::plan_flame::{self, Flame};
 use crate::plan_graph::{self, GraphView};
 use crate::theme::{self, Palette, palette};
 use crate::widgets::{self, fmt_ms};
@@ -76,6 +76,26 @@ impl Metrics {
     /// do, so its bar spans them.
     fn spans_below(&self) -> bool {
         self.cost_span > self.cost.unwrap_or(0.0) * SPAN_SLACK
+    }
+}
+
+/// What a click or key in the graph or flame chart asks of the pane.
+pub enum PlanEvent {
+    Select(NodeId),
+    CloseDetail,
+    Deselect,
+}
+
+impl PlanEvent {
+    pub fn apply(&self, selected: &mut Option<NodeId>, detail_open: &mut bool) {
+        match *self {
+            PlanEvent::Select(node) => {
+                *selected = Some(node);
+                *detail_open = true;
+            }
+            PlanEvent::CloseDetail => *detail_open = false,
+            PlanEvent::Deselect => *selected = None,
+        }
     }
 }
 
@@ -232,11 +252,11 @@ impl PlanView {
         None
     }
 
-    /// Selects a step and opens its details, unfolding the tree down to it.
-    fn select(&mut self, id: NodeId) {
-        self.selected = Some(id);
-        self.detail_open = true;
-        self.reveal_selected();
+    fn apply(&mut self, event: PlanEvent) {
+        event.apply(&mut self.selected, &mut self.detail_open);
+        if let PlanEvent::Select(_) = event {
+            self.reveal_selected();
+        }
     }
 
     /// Unfolds the selected step's ancestors and scrolls to it, after another view moved the selection.
@@ -284,20 +304,22 @@ pub fn show(ui: &mut Ui, id: Id, view: &mut PlanView) {
             });
         view.detail_open = open;
     }
-    egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| match (view.mode, &view.content) {
-        (Mode::Graph, PlanContent::Tree(plan)) => {
-            plan_graph::show(ui, id.with("graph"), plan, &mut view.graph, &mut view.selected, &mut view.detail_open)
-        }
-        (Mode::Flame, PlanContent::Tree(plan)) => {
-            match plan_flame::show(ui, id.with("flame"), plan, view.flame.as_mut(), view.selected, view.detail_open) {
-                Some(Pick::Step(node)) => view.select(node),
-                Some(Pick::CloseDetail) => view.detail_open = false,
-                Some(Pick::Clear) => view.selected = None,
-                None => {}
+    let events =
+        egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| match (view.mode, &view.content) {
+            (Mode::Graph, PlanContent::Tree(plan)) => {
+                plan_graph::show(ui, id.with("graph"), plan, &mut view.graph, view.selected, view.detail_open)
             }
-        }
-        _ => tree::show(ui, id, view),
-    });
+            (Mode::Flame, PlanContent::Tree(plan)) => {
+                plan_flame::show(ui, id.with("flame"), plan, view.flame.as_mut(), view.selected, view.detail_open)
+            }
+            _ => {
+                tree::show(ui, id, view);
+                Vec::new()
+            }
+        });
+    for event in events.inner {
+        view.apply(event);
+    }
 }
 
 fn toolbar(ui: &mut Ui, id: Id, view: &mut PlanView, p: &Palette) {

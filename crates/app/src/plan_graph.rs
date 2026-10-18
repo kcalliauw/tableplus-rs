@@ -17,6 +17,7 @@ use eframe::egui::{
 use tableplus_core::plan::{Access, NodeId, Plan};
 
 use crate::icons::{self, Icon};
+use crate::plan_view::PlanEvent;
 use crate::theme::{self, palette};
 use layout::{BOX_W, Layout};
 use paint::{
@@ -229,12 +230,13 @@ impl GraphView {
         self.camera = Camera { center: g - (at - canvas.center()) / zoom, zoom };
     }
 
-    /// Folds or unfolds `node`, keeping it in place on screen while the other boxes glide.
-    fn toggle(&mut self, plan: &Plan, node: NodeId, now: f64, selected: &mut Option<NodeId>) {
+    /// Folds or unfolds `node`, keeping it in place on screen while the other boxes glide. True
+    /// when the fold hides `selected`.
+    fn toggle(&mut self, plan: &Plan, node: NodeId, now: f64, selected: Option<NodeId>) -> bool {
         if plan.children(node).is_empty() {
-            return;
+            return false;
         }
-        let Some(prepared) = self.prepared.take() else { return };
+        let Some(prepared) = self.prepared.take() else { return false };
         let before = prepared.layout.rects;
         self.collapsed[node.index()] = !self.collapsed[node.index()];
         let next = prepare(plan, &self.collapsed);
@@ -245,11 +247,10 @@ impl GraphView {
                 f.shift(d);
             }
         }
-        if selected.is_some_and(|s| next.layout.rect(s).is_none()) {
-            *selected = Some(node);
-        }
+        let hides_selected = selected.is_some_and(|s| next.layout.rect(s).is_none());
         self.prepared = Some(next);
         self.motion = Some(Motion { from: before, origin: node, start: now });
+        hides_selected
     }
 
     /// Every step's box this frame, with its opacity: in place, or gliding after a fold.
@@ -323,9 +324,9 @@ pub fn show(
     id: Id,
     plan: &Plan,
     view: &mut GraphView,
-    selected: &mut Option<NodeId>,
-    detail_open: &mut bool,
-) {
+    selected: Option<NodeId>,
+    detail_open: bool,
+) -> Vec<PlanEvent> {
     let p = palette(ui);
     let dark = ui.visuals().dark_mode;
     let now = ui.input(|i| i.time);
@@ -338,7 +339,7 @@ pub fn show(
 
     match view.drawn_frame {
         None => {
-            let open = view.opening(canvas, *selected);
+            let open = view.opening(canvas, selected);
             view.camera = Camera { zoom: open.zoom * 0.94, ..open };
             view.fly(open, now, 0.45);
             view.opened_at = now;
@@ -354,6 +355,7 @@ pub fn show(
         response.request_focus();
     }
     let focused = response.has_focus();
+    let mut events = Vec::new();
     if focused {
         ui.memory_mut(|m| {
             m.set_focus_lock_filter(
@@ -361,7 +363,7 @@ pub fn show(
                 EventFilter { tab: false, horizontal_arrows: true, vertical_arrows: true, escape: true },
             )
         });
-        keyboard(ui, plan, view, selected, detail_open, now);
+        events = keyboard(ui, plan, view, selected, detail_open, now);
     }
 
     if response.dragged() {
@@ -410,18 +412,24 @@ pub fn show(
             if let Some(node) = fold_pill_at(pos) {
                 toggle = Some(node);
             } else if let Some(node) = hit(pos) {
-                *selected = Some(node);
-                *detail_open = true;
+                events.push(PlanEvent::Select(node));
             }
         }
     }
-    if let Some(node) = toggle {
-        view.toggle(plan, node, now, selected);
+    let (mut selected, mut detail_open) = (selected, detail_open);
+    for event in &events {
+        event.apply(&mut selected, &mut detail_open);
+    }
+    if let Some(node) = toggle
+        && view.toggle(plan, node, now, selected)
+    {
+        events.push(PlanEvent::Select(node));
+        selected = Some(node);
     }
 
     // Keep the selection in view after it moves, or when the graph comes back into view.
-    if *selected != view.last_selected {
-        view.last_selected = *selected;
+    if selected != view.last_selected {
+        view.last_selected = selected;
         view.reveal = 2;
     }
     if view.reveal > 0 {
@@ -439,7 +447,7 @@ pub fn show(
     }
 
     let rects = view.frame_rects(now);
-    let Some(prepared) = view.prepared.as_ref() else { return };
+    let Some(prepared) = view.prepared.as_ref() else { return events };
     let opacity = ease_out(((now - view.opened_at) as f32 / 0.3).clamp(0.0, 1.0));
     let moving = view.flight.is_some() || view.motion.is_some() || now - view.zoomed_at < 0.2;
     if moving || opacity < 1.0 {
@@ -495,7 +503,7 @@ pub fn show(
         }
         let node_id = prepared.ids[i];
         let look = Look {
-            selected: *selected == Some(node_id),
+            selected: selected == Some(node_id),
             hovered: ui.ctx().animate_bool_with_time(id.with(("hover", i)), hovered == Some(node_id), 0.12),
             alpha,
         };
@@ -521,6 +529,7 @@ pub fn show(
     }
     legend(ui, canvas, prepared, p, dark);
     controls(ui, id, canvas, view, now);
+    events
 }
 
 /// Zoom out, the zoom level (click for 100%), zoom in and fit to view, bottom right.
@@ -577,48 +586,47 @@ fn keyboard(
     ui: &mut Ui,
     plan: &Plan,
     view: &mut GraphView,
-    selected: &mut Option<NodeId>,
-    detail_open: &mut bool,
+    mut selected: Option<NodeId>,
+    mut detail_open: bool,
     now: f64,
-) {
+) -> Vec<PlanEvent> {
     let keys = [Key::ArrowUp, Key::ArrowDown, Key::ArrowLeft, Key::ArrowRight, Key::Enter, Key::Space, Key::Escape];
     let pressed: Vec<Key> = ui.input(|i| keys.into_iter().filter(|k| i.key_pressed(*k)).collect());
     let copy = ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
+    let mut events = Vec::new();
     for key in pressed {
-        let Some(layout) = view.prepared.as_ref().map(|p| &p.layout) else { return };
+        let Some(layout) = view.prepared.as_ref().map(|p| &p.layout) else { return events };
         let neighbour = |sel: NodeId, step: isize| {
             let row = &layout.rows[layout.row_of(sel)?];
             let at = row.iter().position(|n| *n == sel)? as isize + step;
             row.get(usize::try_from(at).ok()?).copied()
         };
-        let to = match (key, *selected) {
-            (Key::ArrowUp | Key::ArrowDown | Key::ArrowLeft | Key::ArrowRight, None) => Some(NodeId::ROOT),
-            (Key::ArrowUp, Some(sel)) => plan.parent(sel),
-            (Key::ArrowDown, Some(sel)) => plan.children(sel).first().filter(|c| layout.rect(**c).is_some()).copied(),
-            (Key::ArrowLeft, Some(sel)) => neighbour(sel, -1),
-            (Key::ArrowRight, Some(sel)) => neighbour(sel, 1),
+        let event = match (key, selected) {
+            (Key::ArrowUp | Key::ArrowDown | Key::ArrowLeft | Key::ArrowRight, None) => {
+                Some(PlanEvent::Select(NodeId::ROOT))
+            }
+            (Key::ArrowUp, Some(sel)) => plan.parent(sel).map(PlanEvent::Select),
+            (Key::ArrowDown, Some(sel)) => {
+                plan.children(sel).first().filter(|c| layout.rect(**c).is_some()).map(|c| PlanEvent::Select(*c))
+            }
+            (Key::ArrowLeft, Some(sel)) => neighbour(sel, -1).map(PlanEvent::Select),
+            (Key::ArrowRight, Some(sel)) => neighbour(sel, 1).map(PlanEvent::Select),
             (Key::Enter | Key::Space, Some(sel)) => {
-                view.toggle(plan, sel, now, selected);
-                None
+                view.toggle(plan, sel, now, selected).then_some(PlanEvent::Select(sel))
             }
-            (Key::Escape, Some(_)) if *detail_open => {
-                *detail_open = false;
-                None
-            }
-            (Key::Escape, Some(_)) => {
-                *selected = None;
-                None
-            }
+            (Key::Escape, Some(_)) if detail_open => Some(PlanEvent::CloseDetail),
+            (Key::Escape, Some(_)) => Some(PlanEvent::Deselect),
             _ => None,
         };
-        if let Some(node) = to {
-            *selected = Some(node);
-            *detail_open = true;
+        if let Some(event) = event {
+            event.apply(&mut selected, &mut detail_open);
+            events.push(event);
         }
     }
-    if copy && let Some(sel) = *selected {
+    if copy && let Some(sel) = selected {
         ui.ctx().copy_text(crate::plan_view::node_text(plan.node(sel)));
     }
+    events
 }
 
 #[cfg(test)]
@@ -707,15 +715,13 @@ mod tests {
     }
 
     #[test]
-    fn folding_keeps_the_step_in_place_and_selects_it_when_the_selection_hides() {
+    fn folding_keeps_the_step_in_place_and_reports_a_hidden_selection() {
         let (plan, [_, _, hash, inner, _]) = analyzed();
         let mut view = view(&plan);
         let before = view.camera.rect(canvas(), view.prepared.as_ref().unwrap().layout.rect(hash).unwrap());
-        let mut selected = Some(inner);
-        view.toggle(&plan, hash, 0.0, &mut selected);
+        assert!(view.toggle(&plan, hash, 0.0, Some(inner)), "folding the hash hides its inner scan");
         let layout = &view.prepared.as_ref().unwrap().layout;
         assert_eq!(layout.rect(inner), None, "the folded step's inputs are hidden");
-        assert_eq!(selected, Some(hash));
         let after = view.camera.rect(canvas(), layout.rect(hash).unwrap());
         assert!((after.center() - before.center()).length() < 0.01, "the folded step stays where it was");
     }

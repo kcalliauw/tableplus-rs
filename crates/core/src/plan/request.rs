@@ -96,14 +96,31 @@ const fn json_v2(mode: ExplainMode, prefix: &'static str) -> Rule {
 }
 
 /// Statements that make the session's next transactions read-only for an Explain Analyze, and
-/// undo it. The statement check below only sees the statement's shape; a query can still write
-/// through a function such as `nextval`, which a read-only transaction refuses.
+/// put back the session's own setting, which may already be read-only. The statement check below
+/// only sees the statement's shape; a query can still write through a function such as
+/// `nextval`, which a read-only transaction refuses.
 const fn read_only(flavor: Flavor) -> (&'static [&'static str], &'static [&'static str]) {
     match flavor {
-        Flavor::Postgres => (&["SET default_transaction_read_only = on"], &["RESET default_transaction_read_only"]),
-        Flavor::MySql | Flavor::MariaDb => {
-            (&["SET SESSION TRANSACTION READ ONLY"], &["SET SESSION TRANSACTION READ WRITE"])
-        }
+        Flavor::Postgres => (
+            &[
+                "SELECT set_config('tableplus.explain_read_only', current_setting('default_transaction_read_only'), false), \
+               set_config('default_transaction_read_only', 'on', false)",
+            ],
+            &[
+                "SELECT set_config('default_transaction_read_only', current_setting('tableplus.explain_read_only'), false)",
+            ],
+        ),
+        Flavor::MySql => (
+            &[
+                "SET @tableplus_explain_read_only = @@SESSION.transaction_read_only, @@SESSION.transaction_read_only = 1",
+            ],
+            &["SET @@SESSION.transaction_read_only = @tableplus_explain_read_only"],
+        ),
+        // MariaDB before 11.1 only knows the older name.
+        Flavor::MariaDb => (
+            &["SET @tableplus_explain_read_only = @@SESSION.tx_read_only, @@SESSION.tx_read_only = 1"],
+            &["SET @@SESSION.tx_read_only = @tableplus_explain_read_only"],
+        ),
         Flavor::Sqlite => (&[], &[]),
     }
 }
@@ -392,13 +409,13 @@ mod tests {
     fn analyze_runs_in_a_read_only_session() {
         for server in [POSTGRES, MYSQL_8018, MYSQL_84, MARIADB] {
             let r = request(&server, "select nextval('s')", Analyze).unwrap();
+            let (setup, reset) = (&r.setup[0], r.reset.last().unwrap());
             assert!(
-                r.setup[0].contains("READ ONLY") || r.setup[0].contains("read_only = on"),
-                "{server}: {:?}",
-                r.setup
+                setup.contains("explain_read_only") && setup.contains("read_only"),
+                "{server} saves the setting: {setup}"
             );
-            assert!(r.reset.last().unwrap().contains("READ WRITE") || r.reset.last().unwrap().starts_with("RESET"));
-            assert!(request(&server, "select 1", Estimate).unwrap().setup.iter().all(|s| !s.contains("READ ONLY")));
+            assert!(reset.contains("explain_read_only"), "{server} restores the saved setting: {reset}");
+            assert!(request(&server, "select 1", Estimate).unwrap().setup.iter().all(|s| !s.contains("read_only")));
         }
     }
 

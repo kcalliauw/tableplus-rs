@@ -4,7 +4,8 @@
 use eframe::egui::{self, Color32, CornerRadius, Rect, RichText, Sense, Stroke, Ui, vec2};
 use tableplus_core::plan::{FactKind, FactValue, NodeId, PlanFact, PlanNode};
 
-use super::{BADGE_PAD, PlanView, extra_badge};
+use super::PlanView;
+use super::tree::{BADGE_PAD, extra_badge};
 use crate::icons::Icon;
 use crate::plan_graph;
 use crate::theme::{self, palette};

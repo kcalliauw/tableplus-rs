@@ -11,15 +11,15 @@ use rusqlite::config::DbConfig;
 use rusqlite::types::ValueRef;
 use rusqlite::{InterruptHandle, OpenFlags, ffi};
 
-use super::{BatchSink, Connection};
+use super::{BatchSink, Connection, Explained, explained};
 use crate::alter::{ColumnDef, create_table_sql};
 use crate::config::ConnectionConfig;
 use crate::dialect::Dialect;
 use crate::model::{
-    ColumnInfo, ColumnMeta, ConstraintInfo, ConstraintKind, IndexInfo, ObjectKind, ResultSet, Row, SchemaObject,
-    StatementResult, TableStructure,
+    ColumnInfo, ColumnMeta, ConstraintInfo, ConstraintKind, IndexInfo, ObjectKind, QueryOutput, ResultSet, Row,
+    SchemaObject, StatementResult, TableStructure,
 };
-use crate::plan::{SQLITE_SCAN_STATUS_COLUMNS, SQLITE_STATEMENT_ID};
+use crate::plan::{Explain, ExplainStatements, SQLITE_SCAN_STATUS_COLUMNS, SQLITE_STATEMENT_ID};
 use crate::server::{Flavor, ServerInfo};
 use crate::value::Value;
 
@@ -55,6 +55,29 @@ fn meta_rows(conn: &rusqlite::Connection, sql: &str) -> rusqlite::Result<Cells> 
         out.push((0..n).map(|i| value_from(r.get_ref(i).unwrap_or(ValueRef::Null)).to_text()).collect());
     }
     Ok(out)
+}
+
+fn query_on(c: &rusqlite::Connection, sql: &str, max_rows: Option<usize>) -> Result<StatementResult> {
+    let mut stmt = c.prepare(sql)?;
+    if stmt.column_count() == 0 {
+        let n = stmt.execute([])?;
+        return Ok(StatementResult::Affected(n as u64));
+    }
+    let columns: Vec<ColumnMeta> =
+        stmt.columns().iter().map(|c| ColumnMeta::new(c.name(), c.decl_type().unwrap_or_default())).collect();
+    let n = columns.len();
+    let limit = max_rows.unwrap_or(usize::MAX);
+    let mut rows: Vec<Row> = Vec::new();
+    let mut truncated = false;
+    let mut q = stmt.query([])?;
+    while let Some(r) = q.next()? {
+        if rows.len() >= limit {
+            truncated = true;
+            break;
+        }
+        rows.push((0..n).map(|i| value_from(r.get_ref(i).unwrap_or(ValueRef::Null))).collect());
+    }
+    Ok(StatementResult::Rows(ResultSet { columns, rows, truncated }))
 }
 
 fn s(v: &Option<String>) -> String {
@@ -325,29 +348,7 @@ impl Connection for SqliteConnection {
 
     async fn query(&self, sql: &str, max_rows: Option<usize>) -> Result<StatementResult> {
         let sql = sql.to_string();
-        self.with_conn(move |c| {
-            let mut stmt = c.prepare(&sql)?;
-            if stmt.column_count() == 0 {
-                let n = stmt.execute([])?;
-                return Ok(StatementResult::Affected(n as u64));
-            }
-            let columns: Vec<ColumnMeta> =
-                stmt.columns().iter().map(|c| ColumnMeta::new(c.name(), c.decl_type().unwrap_or_default())).collect();
-            let n = columns.len();
-            let limit = max_rows.unwrap_or(usize::MAX);
-            let mut rows: Vec<Row> = Vec::new();
-            let mut truncated = false;
-            let mut q = stmt.query([])?;
-            while let Some(r) = q.next()? {
-                if rows.len() >= limit {
-                    truncated = true;
-                    break;
-                }
-                rows.push((0..n).map(|i| value_from(r.get_ref(i).unwrap_or(ValueRef::Null))).collect());
-            }
-            Ok(StatementResult::Rows(ResultSet { columns, rows, truncated }))
-        })
-        .await
+        self.with_conn(move |c| query_on(c, &sql, max_rows)).await
     }
 
     async fn query_batches(&self, sql: &str, batch: usize, sink: &mut BatchSink<'_>) -> Result<u64> {
@@ -407,14 +408,29 @@ impl Connection for SqliteConnection {
         .await
     }
 
-    async fn measure(&self, sql: &str) -> Result<ResultSet> {
-        if !self.scan_status {
-            bail!(
-                "This SQLite library was built without SQLITE_ENABLE_STMT_SCANSTATUS, so it can't measure statements."
-            );
-        }
-        let sql = sql.to_string();
-        self.with_conn(move |c| measure(c, &sql)).await
+    async fn explain(&self, req: &ExplainStatements) -> Result<Explained> {
+        let req = req.clone();
+        let scan_status = self.scan_status;
+        self.with_conn(move |c| {
+            let plan = (|| {
+                for setup in &req.setup {
+                    query_on(c, setup, None)?;
+                }
+                let started = Instant::now();
+                let result = match &req.explain {
+                    Explain::Statement(sql) => query_on(c, sql, None)?,
+                    Explain::Measure(_) if !scan_status => bail!(
+                        "This SQLite library was built without SQLITE_ENABLE_STMT_SCANSTATUS, so it can't measure statements."
+                    ),
+                    Explain::Measure(sql) => StatementResult::Rows(measure(c, sql)?),
+                };
+                Ok(QueryOutput { sql: req.explain.sql().to_string(), result, elapsed: started.elapsed() })
+            })();
+            let failed =
+                req.reset.iter().filter_map(|r| query_on(c, r, None).err().map(|e| format!("{r}: {e:#}"))).collect();
+            explained(plan, failed)
+        })
+        .await
     }
 
     async fn cancel(&self) -> Result<()> {

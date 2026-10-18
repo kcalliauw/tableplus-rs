@@ -6,9 +6,9 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use eframe::egui::{self, Align, CornerRadius, Layout, RichText, Sense, Stroke, Ui, vec2};
-use tableplus_core::driver::{self, Connection};
+use tableplus_core::driver;
 use tableplus_core::model::{QueryOutput, StatementResult};
-use tableplus_core::plan::{self, Explain, ExplainMode, ExplainStatements};
+use tableplus_core::plan::{self, ExplainMode, ExplainStatements};
 use tableplus_core::sqltext::{split_statements, statement_at};
 use tableplus_core::store::HistoryEntry;
 use tableplus_core::{Dialect, ServerInfo, Value};
@@ -44,6 +44,8 @@ struct Outcome {
     /// Set when the result is a query plan.
     plan: Option<PlanContent>,
     note: Option<String>,
+    /// Why the session could not be put back after an EXPLAIN.
+    reset_error: Option<String>,
 }
 
 enum PaneBody {
@@ -137,6 +139,7 @@ impl QueryTab {
             let mut out = Vec::new();
             for job in jobs {
                 let start = Instant::now();
+                let mut reset_error = None;
                 let (result, plan) = match job.step {
                     Err(reason) => (Err(reason), None),
                     Ok(Step::Run) => {
@@ -147,17 +150,18 @@ impl QueryTab {
                         };
                         (result, plan)
                     }
-                    Ok(Step::Explain(req)) => {
-                        let result = run_explain(conn.as_ref(), &req).await;
-                        let plan = match &result {
-                            Ok(out) => out.rows().map(|rs| PlanContent::explained(&server, rs, req.format)),
-                            Err(_) => None,
-                        };
-                        (result, plan)
-                    }
+                    Ok(Step::Explain(req)) => match conn.explain(&req).await {
+                        Ok(explained) => {
+                            reset_error = explained.reset_error;
+                            let plan =
+                                explained.output.rows().map(|rs| PlanContent::explained(&server, rs, req.format));
+                            (Ok(explained.output), plan)
+                        }
+                        Err(e) => (Err(format!("{e:#}")), None),
+                    },
                 };
                 let failed = result.is_err();
-                out.push(Outcome { sql: job.sql, result, elapsed: start.elapsed(), plan, note: job.note });
+                out.push(Outcome { sql: job.sql, result, elapsed: start.elapsed(), plan, note: job.note, reset_error });
                 if failed {
                     break;
                 }
@@ -177,6 +181,7 @@ impl QueryTab {
                 elapsed: Duration::ZERO,
                 plan: None,
                 note: None,
+                reset_error: None,
             }],
         };
         self.panes.clear();
@@ -206,6 +211,9 @@ impl QueryTab {
             let short: String = o.sql.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(80).collect();
             if let Some(note) = &o.note {
                 self.messages.push((false, format!("{note}\n→ {short}")));
+            }
+            if let Some(reset) = &o.reset_error {
+                self.messages.push((true, format!("{reset}\n→ {short}")));
             }
             match o.result {
                 Ok(out) => {
@@ -553,26 +561,6 @@ fn explain_job(server: &ServerInfo, sql: String, mode: ExplainMode) -> Job {
     Job { sql, step, note }
 }
 
-/// Runs an explain's setup, the EXPLAIN itself, then its reset, which runs even after a failure.
-async fn run_explain(conn: &dyn Connection, req: &ExplainStatements) -> Result<QueryOutput, String> {
-    let explain = async {
-        for sql in &req.setup {
-            conn.query(sql, None).await?;
-        }
-        match &req.explain {
-            Explain::Statement(sql) => driver::run(conn, sql, None).await,
-            Explain::Measure(sql) => driver::measure(conn, sql).await,
-        }
-    };
-    let result = explain.await.map_err(|e| format!("{e:#}"));
-    for sql in &req.reset {
-        if let Err(e) = conn.query(sql, None).await {
-            tracing::warn!("could not reset after EXPLAIN ({sql}): {e:#}");
-        }
-    }
-    result
-}
-
 fn result_tab(ui: &mut Ui, label: &str, selected: bool) -> bool {
     let p = palette(ui);
     let font = if selected { theme::bold_font(12.0) } else { theme::ui_font(12.0) };
@@ -676,6 +664,7 @@ mod tests {
 
     #[test]
     fn explain_analyze_never_runs_a_write() {
+        use tableplus_core::plan::Explain;
         use tableplus_core::{Flavor, Version};
         let mysql = ServerInfo::new(Flavor::MySql, Version::new(8, 4, 11));
         let job = explain_job(&mysql, "UPDATE products SET price = 0".into(), ExplainMode::Analyze);

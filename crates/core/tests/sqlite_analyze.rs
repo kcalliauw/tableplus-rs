@@ -9,7 +9,7 @@ use std::time::Duration;
 use common::*;
 use tableplus_core::config::{ConnectionConfig, Credentials, DriverKind};
 use tableplus_core::driver::{self, DynConnection};
-use tableplus_core::plan::{self, Explain, ExplainMode, NodeId, Plan, PlanFormat, PlanNode};
+use tableplus_core::plan::{self, Explain, ExplainMode, ExplainStatements, NodeId, Plan, PlanFormat, PlanNode};
 use tableplus_core::{Dialect, StatementResult, Value};
 
 #[tokio::test(flavor = "multi_thread")]
@@ -42,9 +42,10 @@ fn is_loop(detail: &str) -> bool {
 /// Explain Analyze as the app runs it.
 async fn measured(conn: &DynConnection, sql: &str) -> Plan {
     let req = plan::request(&conn.server_info(), sql, ExplainMode::Analyze).unwrap_or_else(|e| panic!("{sql}: {e}"));
-    let Explain::Measure(sql) = &req.explain else { panic!("SQLite measures the statement itself: {req:?}") };
-    let out = driver::measure(conn.as_ref(), sql).await.unwrap_or_else(|e| panic!("{sql}: {e:#}"));
-    let rs = out.rows().expect("measured rows");
+    assert!(matches!(req.explain, Explain::Measure(_)), "SQLite measures the statement itself: {req:?}");
+    let explained = conn.explain(&req).await.unwrap_or_else(|e| panic!("{sql}: {e:#}"));
+    assert_eq!(explained.reset_error, None);
+    let rs = explained.output.rows().expect("measured rows");
     let plan = plan::parse(&conn.server_info(), rs).expect("a plan").unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(plan.format, PlanFormat::SqliteScanStatus);
     plan
@@ -186,6 +187,16 @@ async fn measures_the_lab_queries_on_northwind() {
     );
 }
 
+/// Asks the driver to measure `sql` as it is, without the statement check in `plan::request`.
+fn measure(sql: &str) -> ExplainStatements {
+    ExplainStatements {
+        setup: Vec::new(),
+        explain: Explain::Measure(sql.into()),
+        reset: Vec::new(),
+        format: PlanFormat::SqliteScanStatus,
+    }
+}
+
 async fn checksum(conn: &DynConnection) -> Option<String> {
     rows(conn, "SELECT count(*) || ':' || total(total) || ':' || group_concat(status, '') FROM orders").await.rows[0][0]
         .to_text()
@@ -205,7 +216,7 @@ async fn never_measures_a_write() {
         let refused = plan::request(&conn.server_info(), sql, ExplainMode::Analyze).unwrap_err();
         assert!(refused.0.contains(verb), "{sql}: {refused}");
         // The driver refuses on its own too, by SQLite's account of the statement.
-        let err = driver::measure(conn.as_ref(), sql).await.unwrap_err().to_string();
+        let err = conn.explain(&measure(sql)).await.unwrap_err().to_string();
         assert!(err.contains("would change data"), "{sql}: {err}");
     }
     assert_eq!(checksum(&conn).await, before);
@@ -223,7 +234,7 @@ async fn stop_interrupts_a_measured_run() {
     let endless = "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n) SELECT count(*) FROM n";
     let task = {
         let conn = conn.clone();
-        tokio::spawn(async move { driver::measure(conn.as_ref(), endless).await })
+        tokio::spawn(async move { conn.explain(&measure(endless)).await })
     };
     tokio::time::sleep(Duration::from_millis(300)).await;
     conn.cancel().await.unwrap();

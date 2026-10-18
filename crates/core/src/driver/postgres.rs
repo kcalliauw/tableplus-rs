@@ -9,13 +9,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
-use futures_util::{StreamExt, pin_mut};
+use futures_util::{FutureExt, StreamExt, pin_mut};
 use postgres_native_tls::MakeTlsConnector;
 use tokio::sync::Mutex;
 use tokio_postgres::types::Type;
 use tokio_postgres::{CancelToken, Client, SimpleQueryMessage};
 
-use super::{BatchSink, Connection};
+use super::{BatchSink, Connection, Explained, explain_with};
 use crate::alter::{ColumnDef, create_table_sql};
 use crate::config::{ConnectionConfig, Credentials, SslMode};
 use crate::dialect::Dialect;
@@ -23,6 +23,7 @@ use crate::model::{
     ColumnInfo, ColumnMeta, ConstraintInfo, ConstraintKind, IndexInfo, ObjectKind, ResultSet, Row, SchemaObject,
     StatementResult, TableStructure,
 };
+use crate::plan::ExplainStatements;
 use crate::server::{Flavor, ServerInfo};
 use crate::tunnel::{SshTunnel, open_tunnel};
 use crate::value::{Value, parse_hex};
@@ -170,66 +171,86 @@ impl PgConnection {
             .collect())
     }
 
-    /// Runs one statement, reporting column metadata once and then each row until `on_row`
-    /// returns false. Returns whether the statement produced a result set, and the command count.
-    async fn stream(
-        &self,
-        sql: &str,
-        on_columns: &mut (dyn FnMut(&[ColumnMeta]) + Send),
-        on_row: &mut (dyn FnMut(Row) -> Result<bool> + Send),
-    ) -> Result<(bool, u64)> {
-        let client = self.client.lock().await;
-        let types: Option<Vec<Type>> = match client.prepare(sql).await {
-            Ok(stmt) => Some(stmt.columns().iter().map(|c| c.type_().clone()).collect()),
-            // Multi-statement strings can't be prepared; run them untyped.
-            Err(e)
-                if e.as_db_error()
-                    .is_some_and(|d| d.code().code() == "42601" && d.message().contains("multiple commands")) =>
-            {
-                None
-            }
-            Err(e) => return Err(pg_error(e)),
-        };
-        let stream = client.simple_query_raw(sql).await.map_err(pg_error)?;
-        pin_mut!(stream);
-        let mut has_rows = false;
-        let mut affected = 0;
-        while let Some(msg) = stream.next().await {
-            match msg.map_err(pg_error)? {
-                SimpleQueryMessage::RowDescription(desc) if !has_rows => {
-                    has_rows = true;
-                    let cols: Vec<ColumnMeta> = desc
-                        .iter()
-                        .enumerate()
-                        .map(|(i, c)| {
-                            let ty = types.as_ref().and_then(|t| t.get(i));
-                            ColumnMeta::new(c.name(), ty.map(type_label).unwrap_or_default())
-                        })
-                        .collect();
-                    on_columns(&cols);
-                }
-                SimpleQueryMessage::Row(r) => {
-                    let row: Row =
-                        (0..r.len()).map(|i| to_value(r.get(i), types.as_ref().and_then(|t| t.get(i)))).collect();
-                    if !on_row(row)? {
-                        break;
-                    }
-                }
-                SimpleQueryMessage::CommandComplete(n) => {
-                    affected = n;
-                    if has_rows {
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        Ok((has_rows, affected))
-    }
-
     fn regclass(schema: &str, table: &str) -> String {
         format!("{}::regclass", D.quote_str(&D.qualified(schema, table)))
     }
+}
+
+/// Runs one statement, reporting column metadata once and then each row until `on_row`
+/// returns false. Returns whether the statement produced a result set, and the command count.
+async fn stream(
+    client: &Client,
+    sql: &str,
+    on_columns: &mut (dyn FnMut(&[ColumnMeta]) + Send),
+    on_row: &mut (dyn FnMut(Row) -> Result<bool> + Send),
+) -> Result<(bool, u64)> {
+    let types: Option<Vec<Type>> = match client.prepare(sql).await {
+        Ok(stmt) => Some(stmt.columns().iter().map(|c| c.type_().clone()).collect()),
+        // Multi-statement strings can't be prepared; run them untyped.
+        Err(e)
+            if e.as_db_error()
+                .is_some_and(|d| d.code().code() == "42601" && d.message().contains("multiple commands")) =>
+        {
+            None
+        }
+        Err(e) => return Err(pg_error(e)),
+    };
+    let stream = client.simple_query_raw(sql).await.map_err(pg_error)?;
+    pin_mut!(stream);
+    let mut has_rows = false;
+    let mut affected = 0;
+    while let Some(msg) = stream.next().await {
+        match msg.map_err(pg_error)? {
+            SimpleQueryMessage::RowDescription(desc) if !has_rows => {
+                has_rows = true;
+                let cols: Vec<ColumnMeta> = desc
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| {
+                        let ty = types.as_ref().and_then(|t| t.get(i));
+                        ColumnMeta::new(c.name(), ty.map(type_label).unwrap_or_default())
+                    })
+                    .collect();
+                on_columns(&cols);
+            }
+            SimpleQueryMessage::Row(r) => {
+                let row: Row =
+                    (0..r.len()).map(|i| to_value(r.get(i), types.as_ref().and_then(|t| t.get(i)))).collect();
+                if !on_row(row)? {
+                    break;
+                }
+            }
+            SimpleQueryMessage::CommandComplete(n) => {
+                affected = n;
+                if has_rows {
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok((has_rows, affected))
+}
+
+async fn query_on(client: &Client, sql: &str, max_rows: Option<usize>) -> Result<StatementResult> {
+    let limit = max_rows.unwrap_or(usize::MAX);
+    let mut cols = Vec::new();
+    let mut rows: Vec<Row> = Vec::new();
+    let mut truncated = false;
+    let (has_rows, affected) = stream(client, sql, &mut |c| cols = c.to_vec(), &mut |row| {
+        if rows.len() >= limit {
+            truncated = true;
+            return Ok(false);
+        }
+        rows.push(row);
+        Ok(true)
+    })
+    .await?;
+    Ok(if has_rows {
+        StatementResult::Rows(ResultSet { columns: cols, rows, truncated })
+    } else {
+        StatementResult::Affected(affected)
+    })
 }
 
 fn s(v: &Option<String>) -> String {
@@ -452,25 +473,7 @@ impl Connection for PgConnection {
     }
 
     async fn query(&self, sql: &str, max_rows: Option<usize>) -> Result<StatementResult> {
-        let limit = max_rows.unwrap_or(usize::MAX);
-        let mut cols = Vec::new();
-        let mut rows: Vec<Row> = Vec::new();
-        let mut truncated = false;
-        let (has_rows, affected) = self
-            .stream(sql, &mut |c| cols = c.to_vec(), &mut |row| {
-                if rows.len() >= limit {
-                    truncated = true;
-                    return Ok(false);
-                }
-                rows.push(row);
-                Ok(true)
-            })
-            .await?;
-        Ok(if has_rows {
-            StatementResult::Rows(ResultSet { columns: cols, rows, truncated })
-        } else {
-            StatementResult::Affected(affected)
-        })
+        query_on(&*self.client.lock().await, sql, max_rows).await
     }
 
     async fn query_batches(&self, sql: &str, batch: usize, sink: &mut BatchSink<'_>) -> Result<u64> {
@@ -478,8 +481,8 @@ impl Connection for PgConnection {
         let mut buf: Vec<Row> = Vec::with_capacity(batch);
         let mut total = 0u64;
         let mut failed = None;
-        let (has_rows, _) = self
-            .stream(sql, &mut |c| *cols.lock().expect("cols") = c.to_vec(), &mut |row| {
+        let (has_rows, _) =
+            stream(&*self.client.lock().await, sql, &mut |c| *cols.lock().expect("cols") = c.to_vec(), &mut |row| {
                 buf.push(row);
                 total += 1;
                 if buf.len() >= batch
@@ -520,6 +523,10 @@ impl Connection for PgConnection {
         }
         tx.commit().await.map_err(pg_error)?;
         Ok(total)
+    }
+
+    async fn explain(&self, req: &ExplainStatements) -> Result<Explained> {
+        explain_with(&mut *self.client.lock().await, req, |client, sql| query_on(client, sql, None).boxed()).await
     }
 
     async fn cancel(&self) -> Result<()> {

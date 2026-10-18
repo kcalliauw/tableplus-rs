@@ -100,22 +100,32 @@ const fn json_v2(mode: ExplainMode, prefix: &'static str) -> Rule {
 ///
 /// PostgreSQL runs it in a transaction of its own that is rolled back. On MySQL and MariaDB,
 /// starting a transaction would release the session's `LOCK TABLES` locks, so the session's
-/// read-only setting covers the statement instead and is put back afterwards. With autocommit
-/// off the statement opens a transaction, and the rollback ends it whatever `completion_type`
-/// says.
+/// read-only and autocommit settings are saved and turned off instead: the statement opens a
+/// read-only transaction, and the rollback undoes what read-only allows, such as writes to
+/// temporary tables, whatever `completion_type` says. Both settings are put back afterwards.
 const fn read_only(flavor: Flavor) -> (&'static [&'static str], &'static [&'static str]) {
     match flavor {
         Flavor::Postgres => (&["BEGIN READ ONLY"], &["ROLLBACK"]),
         Flavor::MySql => (
+            &["SET @tableplus_explain_read_only = @@SESSION.transaction_read_only, \
+               @tableplus_explain_autocommit = @@SESSION.autocommit, \
+               @@SESSION.transaction_read_only = 1, @@SESSION.autocommit = 0"],
             &[
-                "SET @tableplus_explain_read_only = @@SESSION.transaction_read_only, @@SESSION.transaction_read_only = 1",
+                "ROLLBACK AND NO CHAIN NO RELEASE",
+                "SET @@SESSION.autocommit = @tableplus_explain_autocommit, \
+                 @@SESSION.transaction_read_only = @tableplus_explain_read_only",
             ],
-            &["ROLLBACK AND NO CHAIN NO RELEASE", "SET @@SESSION.transaction_read_only = @tableplus_explain_read_only"],
         ),
         // MariaDB before 11.1 only knows the older name.
         Flavor::MariaDb => (
-            &["SET @tableplus_explain_read_only = @@SESSION.tx_read_only, @@SESSION.tx_read_only = 1"],
-            &["ROLLBACK AND NO CHAIN NO RELEASE", "SET @@SESSION.tx_read_only = @tableplus_explain_read_only"],
+            &["SET @tableplus_explain_read_only = @@SESSION.tx_read_only, \
+               @tableplus_explain_autocommit = @@SESSION.autocommit, \
+               @@SESSION.tx_read_only = 1, @@SESSION.autocommit = 0"],
+            &[
+                "ROLLBACK AND NO CHAIN NO RELEASE",
+                "SET @@SESSION.autocommit = @tableplus_explain_autocommit, \
+                 @@SESSION.tx_read_only = @tableplus_explain_read_only",
+            ],
         ),
         Flavor::Sqlite => (&[], &[]),
     }

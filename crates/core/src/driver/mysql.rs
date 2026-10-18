@@ -175,11 +175,18 @@ fn s(v: &Option<String>) -> String {
     v.clone().unwrap_or_default()
 }
 
-/// Prepares `sql` and drops it. The prepared-statement protocol takes a single statement, and
-/// MySQL 5.6 to 9.7 and MariaDB 10.6 to 11.8 prepare every EXPLAIN form the plan requests use.
+/// Prepares `sql` on the server and drops it. PREPARE takes a single statement, and MySQL 5.6 to
+/// 9.7 and MariaDB 10.6 to 11.8 prepare every EXPLAIN form the plan requests use. The text goes
+/// in as a binary hex literal, so the server reads its bytes in the connection's character set
+/// and sql_mode, as it reads the statement itself; `mysql_async`'s own prepare first scans for
+/// parameters with backslash escapes, and fails under NO_BACKSLASH_ESCAPES.
 async fn prepare(conn: &mut Conn, sql: &str) -> Result<()> {
-    let stmt = conn.prep(sql).await.map_err(my_error)?;
-    conn.close(stmt).await.map_err(my_error)
+    let hex: String = sql.bytes().map(|b| format!("{b:02X}")).collect();
+    conn.query_drop(format!("SET @tableplus_explain_sql = X'{hex}'")).await.map_err(my_error)?;
+    let prepared = conn.query_drop("PREPARE tableplus_explain FROM @tableplus_explain_sql").await;
+    conn.query_drop("SET @tableplus_explain_sql = NULL").await.map_err(my_error)?;
+    prepared.map_err(my_error)?;
+    conn.query_drop("DEALLOCATE PREPARE tableplus_explain").await.map_err(my_error)
 }
 
 /// The server flags an open transaction in every OK packet; `DO 0` fetches a fresh one.

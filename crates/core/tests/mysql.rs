@@ -226,11 +226,22 @@ async fn mysql_explain_plans() {
 /// is left with. `touch` writes to `table`, and `other` is a second table.
 async fn exercise_explain_transactions(conn: &DynConnection, touch: &str, table: &str, other: &str) {
     exercise_explain_in_transaction(conn, "START TRANSACTION", touch).await;
+    let autocommit = async || driver::scalar(conn.as_ref(), "SELECT @@SESSION.autocommit").await.unwrap();
+    explain(conn, "SELECT 1", ExplainMode::Analyze).await;
+    assert_eq!(autocommit().await.as_deref(), Some("1"));
     conn.query("SET autocommit = 0", None).await.unwrap();
     explain(conn, "SELECT 1", ExplainMode::Analyze).await;
+    assert_eq!(autocommit().await.as_deref(), Some("0"));
     conn.query(touch, None).await.unwrap_or_else(|e| panic!("no read-only transaction is left open: {e:#}"));
     exercise_explain_in_transaction(conn, "SELECT 1", touch).await;
     conn.query("SET autocommit = 1", None).await.unwrap();
+
+    let sql_mode = driver::scalar(conn.as_ref(), "SELECT @@SESSION.sql_mode").await.unwrap().unwrap_or_default();
+    conn.query("SET SESSION sql_mode = 'NO_BACKSLASH_ESCAPES'", None).await.unwrap();
+    for mode in [ExplainMode::Estimate, ExplainMode::Analyze] {
+        explain(conn, r"SELECT '\' AS slash, '?:named' AS txt", mode).await;
+    }
+    conn.query(&format!("SET SESSION sql_mode = '{sql_mode}'"), None).await.unwrap();
 
     for completion in ["1", "2"] {
         conn.query(&format!("SET completion_type = {completion}"), None).await.unwrap();

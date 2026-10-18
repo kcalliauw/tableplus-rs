@@ -505,8 +505,9 @@ pub fn statement_at(src: &str, cursor: usize, dialect: Dialect) -> Option<Statem
 }
 
 /// Removes a trailing `;` and whitespace.
+/// Only ASCII whitespace ends a statement: a trailing no-break space belongs to the last name.
 pub fn trim_statement(sql: &str) -> &str {
-    sql.trim().trim_end_matches(';').trim_end()
+    sql.trim_start().trim_end_matches(is_space).trim_end_matches(';').trim_end_matches(is_space)
 }
 
 /// True for statements that produce rows (used to decide on row limits).
@@ -616,5 +617,10 @@ mod tests {
         assert!(is_query("WITH x AS (select 1) select * from x"));
         assert!(!is_query("update t set a = 1"));
         assert_eq!(trim_statement(" select 1 ; "), "select 1");
+        assert_eq!(
+            trim_statement("\u{a0}delete from t\u{a0} ;\n"),
+            "delete from t\u{a0}",
+            "a trailing no-break space is part of the name"
+        );
     }
 }

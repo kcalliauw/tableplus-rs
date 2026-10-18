@@ -98,19 +98,19 @@ impl QueryTab {
         }
     }
 
-    /// Each statement without surrounding whitespace. The tokenizer reads a no-break space as part
-    /// of a name, as the servers do, and indentation pasted from a web page often has them.
+    /// Each statement without leading whitespace. The tokenizer reads a no-break space as part of a
+    /// name, as the servers do, and indentation pasted from a web page often has them; at the end
+    /// one belongs to the last name, so only the start is trimmed.
     fn statements_to_run(&self, dialect: Dialect, all: bool) -> Vec<String> {
-        if let Some((a, b)) = self.selection.filter(|_| !all) {
+        let (src, spans) = if let Some((a, b)) = self.selection.filter(|_| !all) {
             let sel = &self.sql[a.min(self.sql.len())..b.min(self.sql.len())];
-            return split_statements(sel, dialect).iter().map(|s| s.text(sel).trim().to_string()).collect();
-        }
-        if all {
-            return split_statements(&self.sql, dialect).iter().map(|s| s.text(&self.sql).trim().to_string()).collect();
-        }
-        statement_at(&self.sql, self.cursor, dialect)
-            .map(|s| vec![s.text(&self.sql).trim().to_string()])
-            .unwrap_or_default()
+            (sel, split_statements(sel, dialect))
+        } else if all {
+            (self.sql.as_str(), split_statements(&self.sql, dialect))
+        } else {
+            (self.sql.as_str(), statement_at(&self.sql, self.cursor, dialect).into_iter().collect())
+        };
+        spans.iter().map(|s| s.text(src).trim_start()).filter(|s| !s.is_empty()).map(str::to_string).collect()
     }
 
     fn run(&mut self, ctx: &mut TabCtx, all: bool) {
@@ -718,7 +718,10 @@ mod tests {
         assert_eq!(t.statements_to_run(Dialect::Postgres, true).len(), 3);
         t.selection = Some((0, 18));
         assert_eq!(t.statements_to_run(Dialect::Postgres, false), vec!["select 1", "select 2"]);
-        let pasted = QueryTab::new("q".into(), "select 1;\n\u{a0}\u{a0}select 2".into());
-        assert_eq!(pasted.statements_to_run(Dialect::Postgres, true), vec!["select 1", "select 2"]);
+        let pasted = QueryTab::new("q".into(), "select 1;\n\u{a0}\u{a0}select 2;\u{a0};delete from t\u{a0}".into());
+        assert_eq!(
+            pasted.statements_to_run(Dialect::Postgres, true),
+            vec!["select 1", "select 2", "delete from t\u{a0}"]
+        );
     }
 }

@@ -87,11 +87,25 @@ pub struct Explained {
 /// Runs one statement on a session the caller holds.
 type Query<S> = for<'a> fn(&'a mut S, &'a str) -> BoxFuture<'a, Result<StatementResult>>;
 
+/// Whether a session the caller holds has a transaction open.
+type InTransaction<S> = for<'a> fn(&'a mut S) -> BoxFuture<'a, Result<bool>>;
+
 /// [`Connection::explain`] for drivers that ask for every plan with an EXPLAIN statement.
-async fn explain_with<S: Send>(session: &mut S, req: &ExplainStatements, query: Query<S>) -> Result<Explained> {
+async fn explain_with<S: Send>(
+    session: &mut S,
+    req: &ExplainStatements,
+    query: Query<S>,
+    in_transaction: InTransaction<S>,
+) -> Result<Explained> {
     let Explain::Statement(sql) = &req.explain else {
         bail!("this database measures plans through EXPLAIN statements");
     };
+    if req.own_transaction && in_transaction(session).await? {
+        bail!(
+            "Explain Analyze runs the statement in a read-only transaction of its own, and this session has a \
+             transaction open. Commit or roll back first."
+        );
+    }
     let plan = async {
         for setup in &req.setup {
             query(session, setup).await?;

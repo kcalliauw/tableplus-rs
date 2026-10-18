@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use futures_util::FutureExt;
-use mysql_async::consts::{ColumnFlags, ColumnType};
+use mysql_async::consts::{ColumnFlags, ColumnType, StatusFlags};
 use mysql_async::prelude::Queryable;
 use mysql_async::{Conn, Opts, OptsBuilder, SslOpts};
 use tokio::sync::Mutex;
@@ -173,6 +173,13 @@ fn to_value(v: Option<mysql_async::Value>, t: ColumnType, flags: ColumnFlags, ch
 
 fn s(v: &Option<String>) -> String {
     v.clone().unwrap_or_default()
+}
+
+/// The server flags an open transaction in every OK packet; `DO 0` fetches a fresh one.
+async fn in_transaction(conn: &mut Conn) -> Result<bool> {
+    conn.query_drop("DO 0").await.map_err(my_error)?;
+    let flags = conn.last_ok_packet().map(|ok| ok.status_flags()).context("the server sent no status")?;
+    Ok(flags.contains(StatusFlags::SERVER_STATUS_IN_TRANS))
 }
 
 async fn query_on(conn: &mut Conn, sql: &str, max_rows: Option<usize>) -> Result<StatementResult> {
@@ -608,7 +615,13 @@ impl Connection for MyConnection {
     }
 
     async fn explain(&self, req: &ExplainStatements) -> Result<Explained> {
-        explain_with(&mut *self.conn.lock().await, req, |conn, sql| query_on(conn, sql, None).boxed()).await
+        explain_with(
+            &mut *self.conn.lock().await,
+            req,
+            |conn, sql| query_on(conn, sql, None).boxed(),
+            |conn| in_transaction(conn).boxed(),
+        )
+        .await
     }
 
     async fn cancel(&self) -> Result<()> {

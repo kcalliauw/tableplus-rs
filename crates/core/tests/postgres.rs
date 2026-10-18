@@ -228,6 +228,14 @@ async fn explain_plans() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn explain_analyze_refuses_an_open_transaction() {
+    let Some(conn) = connect_or_skip(&pg_config(), &password()).await else {
+        return;
+    };
+    exercise_explain_in_transaction(&conn, "BEGIN", "UPDATE orders SET note = note WHERE id = 1").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn explain_analyze_blocks_writes_through_functions() {
     let Some(conn) = connect_or_skip(&pg_config(), &password()).await else {
         return;

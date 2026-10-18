@@ -151,6 +151,7 @@ fn measure(sql: &str) -> ExplainStatements {
         explain: Explain::Measure(sql.into()),
         reset: Vec::new(),
         format: PlanFormat::SqliteScanStatus,
+        own_transaction: false,
     }
 }
 

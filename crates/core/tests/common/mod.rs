@@ -488,6 +488,19 @@ pub async fn exercise_read_only_explain(conn: &DynConnection, slow: &str, touch:
     assert!(err.to_ascii_lowercase().replace('-', " ").contains("read only"), "{err}");
 }
 
+/// Explain Analyze refuses a session that has its own transaction open, because its read-only
+/// transaction can't start inside the user's, and leaves the user's transaction alone. `begin`
+/// opens a transaction and `touch` needs a writable one.
+pub async fn exercise_explain_in_transaction(conn: &DynConnection, begin: &str, touch: &str) {
+    conn.query(begin, None).await.unwrap();
+    let req = plan::request(&conn.server_info(), "SELECT 1", ExplainMode::Analyze).unwrap();
+    let err = conn.explain(&req).await.unwrap_err().to_string();
+    assert!(err.contains("transaction open"), "{err}");
+    conn.query(touch, None).await.unwrap_or_else(|e| panic!("the user's transaction stays writable: {e:#}"));
+    conn.query("ROLLBACK", None).await.unwrap();
+    explain(conn, "SELECT 1", ExplainMode::Analyze).await;
+}
+
 /// Times a closure for perf assertions/logging.
 pub async fn timed<T>(label: &str, f: impl std::future::Future<Output = T>) -> T {
     let start = Instant::now();

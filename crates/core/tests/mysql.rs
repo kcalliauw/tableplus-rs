@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use common::*;
 use tableplus_core::config::SslMode;
-use tableplus_core::driver;
+use tableplus_core::driver::{self, DynConnection};
 use tableplus_core::model::{ConstraintKind, ObjectKind};
 use tableplus_core::plan::ExplainMode;
 use tableplus_core::sqlgen::{self, Filter, FilterOp, SortKey};
@@ -218,6 +218,33 @@ async fn mysql_explain_plans() {
         "SET SESSION transaction_read_only = 1",
     )
     .await;
+}
+
+/// With autocommit off, Explain Analyze opens no transaction that outlives it, and refuses once a
+/// statement has opened one.
+async fn exercise_explain_transactions(conn: &DynConnection, touch: &str) {
+    exercise_explain_in_transaction(conn, "START TRANSACTION", touch).await;
+    conn.query("SET autocommit = 0", None).await.unwrap();
+    explain(conn, "SELECT 1", ExplainMode::Analyze).await;
+    conn.query(touch, None).await.unwrap_or_else(|e| panic!("no read-only transaction is left open: {e:#}"));
+    exercise_explain_in_transaction(conn, "SELECT 1", touch).await;
+    conn.query("SET autocommit = 1", None).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mysql_explain_transactions() {
+    let Some(conn) = connect_or_skip(&mysql_config(), &password()).await else {
+        return;
+    };
+    exercise_explain_transactions(&conn, "UPDATE orders SET note = note WHERE id = 1").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mariadb_explain_transactions() {
+    let Some(conn) = connect_or_skip(&mariadb_config(), &password()).await else {
+        return;
+    };
+    exercise_explain_transactions(&conn, "UPDATE invoices SET paid = paid WHERE id = 1").await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

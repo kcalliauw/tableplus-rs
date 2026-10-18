@@ -25,6 +25,10 @@ pub struct ExplainStatements {
     pub reset: Vec<String>,
     /// The format the server answers in.
     pub format: PlanFormat,
+    /// `setup` opens a read-only transaction that `reset` rolls back. Inside a transaction the
+    /// session already has open, that would run in the user's transaction or commit it, so the
+    /// driver refuses such a session.
+    pub own_transaction: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,31 +96,13 @@ const fn json_v2(mode: ExplainMode, prefix: &'static str) -> Rule {
     }
 }
 
-/// Statements that make the session read-only for an Explain Analyze and put back its own
-/// setting. The statement check below only sees the statement's shape, and a query can still
-/// write through a function such as `nextval`.
+/// The read-only transaction an Explain Analyze runs in, rolled back afterwards. The statement
+/// check below only sees the statement's shape, and a query can still write through a function
+/// such as `nextval`.
 const fn read_only(flavor: Flavor) -> (&'static [&'static str], &'static [&'static str]) {
     match flavor {
-        Flavor::Postgres => (
-            &[
-                "SELECT set_config('tableplus.explain_read_only', current_setting('default_transaction_read_only'), false), \
-               set_config('default_transaction_read_only', 'on', false)",
-            ],
-            &[
-                "SELECT set_config('default_transaction_read_only', current_setting('tableplus.explain_read_only'), false)",
-            ],
-        ),
-        Flavor::MySql => (
-            &[
-                "SET @tableplus_explain_read_only = @@SESSION.transaction_read_only, @@SESSION.transaction_read_only = 1",
-            ],
-            &["SET @@SESSION.transaction_read_only = @tableplus_explain_read_only"],
-        ),
-        // MariaDB before 11.1 only knows the older name.
-        Flavor::MariaDb => (
-            &["SET @tableplus_explain_read_only = @@SESSION.tx_read_only, @@SESSION.tx_read_only = 1"],
-            &["SET @@SESSION.tx_read_only = @tableplus_explain_read_only"],
-        ),
+        Flavor::Postgres => (&["BEGIN READ ONLY"], &["ROLLBACK"]),
+        Flavor::MySql | Flavor::MariaDb => (&["START TRANSACTION READ ONLY"], &["ROLLBACK"]),
         Flavor::Sqlite => (&[], &[]),
     }
 }
@@ -172,10 +158,11 @@ pub fn request(server: &ServerInfo, sql: &str, mode: ExplainMode) -> Result<Expl
         Recipe::Wrap { prefix, format, setup, reset } => {
             let (ro_setup, ro_reset) = if mode == Analyze { read_only(server.flavor) } else { (&[][..], &[][..]) };
             Ok(ExplainStatements {
-                setup: ro_setup.iter().chain(setup).map(|s| s.to_string()).collect(),
+                setup: setup.iter().chain(ro_setup).map(|s| s.to_string()).collect(),
                 explain: Explain::Statement(format!("{prefix}{sql}")),
-                reset: reset.iter().chain(ro_reset).map(|s| s.to_string()).collect(),
+                reset: ro_reset.iter().chain(reset).map(|s| s.to_string()).collect(),
                 format,
+                own_transaction: !ro_setup.is_empty(),
             })
         }
         Recipe::Measure(_) if !server.scan_status => Err(Unsupported(
@@ -187,6 +174,7 @@ pub fn request(server: &ServerInfo, sql: &str, mode: ExplainMode) -> Result<Expl
             explain: Explain::Measure(sql.to_string()),
             reset: Vec::new(),
             format,
+            own_transaction: false,
         }),
         Recipe::Unsupported(reason) => Err(Unsupported(reason.into())),
     }

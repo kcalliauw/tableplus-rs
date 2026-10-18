@@ -75,6 +75,13 @@ cargo build --release          # binary: target/release/tableplus-rs
 cargo run --release
 ```
 
+`.cargo/config.toml` sets `LIBSQLITE3_FLAGS=SQLITE_ENABLE_STMT_SCANSTATUS` for every cargo command
+run inside the repository, and the build needs it: the app links `sqlite3_stmt_scanstatus_v2`,
+which the bundled SQLite only has with that flag. Cargo reads that file from the working
+directory, so a build started outside the repository (`cargo install --git`, or `--manifest-path`
+from elsewhere) fails to link, as does one with `LIBSQLITE3_FLAGS` already set in the environment
+without the flag.
+
 **macOS** — build a signed `.app` and a DMG in `dist/` (ad-hoc signature unless `SIGN_IDENTITY` is set):
 
 ```sh
@@ -185,7 +192,8 @@ crates/core   tableplus-core — no UI code
   alter.rs      structure diff → ALTER TABLE / CREATE INDEX / COMMENT per dialect
   sqltext.rs    lexer shared by highlighting, statement splitting and completion
   plan/         query plans: one tree model for every engine, the EXPLAIN statement per engine
-                and version, and the parsers (MySQL TREE so far)
+                and version, and parsers for MySQL TREE and JSON, MariaDB and PostgreSQL JSON,
+                and SQLite's query plan and measured scan status
   completion.rs context-aware autocomplete (tables, aliases, columns, keywords, functions)
   export.rs     CSV / JSON / INSERT writers, CSV → INSERT import
   config.rs, store.rs, secrets.rs   saved connections, history, Keychain / 0600 secrets file
@@ -194,7 +202,8 @@ crates/app    the egui application (binary: tableplus-rs)
   grid.rs       virtualized data grid;  staged.rs  staged edits
   table_tab.rs  data + structure tabs;  structure.rs  structure editor
   query_tab.rs  SQL editor + result tabs;  editor.rs  code editor with highlighting and completion
-  plan_view.rs  plan tree with time bars and a detail panel, painted like the grid
+  plan_view.rs  plan pane: tree with time bars, graph (plan_graph.rs), flame chart (plan_flame.rs)
+                and a detail panel
   sidebar.rs, quick_open.rs, welcome.rs, conn_dialog.rs, export_dialog.rs, theme.rs, …
 ```
 

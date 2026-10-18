@@ -103,98 +103,43 @@ directory with `0600` permissions. Connections can also be set to ask for the pa
 
 ## Query plans
 
-EXPLAIN output differs per engine and per version: MySQL prints a text tree (TREE format, and the
-default on 9.x), MariaDB and PostgreSQL print JSON, and SQLite's `EXPLAIN QUERY PLAN` returns rows
-with no numbers. The EXPLAIN lab captured 387 outputs from 18 servers to pin these down. The app
-reads them into one model (`plan/`), so the views never branch on the engine:
+EXPLAIN output differs by engine and version: MySQL prints a text tree or one of two JSON shapes,
+MariaDB and PostgreSQL print JSON, and SQLite's `EXPLAIN QUERY PLAN` returns rows without numbers.
+A separate EXPLAIN lab captured 387 outputs from 18 servers to pin these down.
+[docs/query-plans.md](docs/query-plans.md) describes each format and how times and bars are
+derived.
 
-- A plan is a tree of steps. Each step has an operation, the object and index it reads, a
-  condition, an optional estimate (rows per loop, cost) and optional actuals (rows per loop, loops,
-  and per-loop time to the first and last row). The first-row time is optional because MariaDB
-  reports durations only. Every raw key and value is kept for the detail panel.
-- Inclusive time, self time and the estimate ratio are derived in core, not stored, so every view
-  agrees. Self time passes through steps the server didn't time, such as MySQL's `-> Hash`. A
-  MySQL estimate of `rows=0` means "not estimated" (temporary tables), so it is never flagged.
-- Which statement asks for a plan is a table of rules by engine, mode and minimum version, built
-  from the lab's capability matrix. Explain Analyze falls back to the estimate, with a note, where
-  the server can't measure (MySQL before 8.0.18, SQLite before 3.42) and for statements that would
-  change data. Running an UPDATE to time it is never worth the surprise.
-- MySQL 8.4 and later explain through JSON format version 2, not TREE text, for both modes.
-  Version 2 lists the same steps as TREE (a test checks this on every captured pair) and keeps
-  the table, schema, used columns, index, lookup and filter conditions and join algorithm as
-  separate fields, at full precision where TREE rounds to three digits. The cost is two extra
-  statements per Explain: one saves the session's `explain_json_format_version` and sets it to 2,
-  the other puts it back, on the same connection. MySQL 8.0.18 to 8.3 keep TREE, and older
-  servers use JSON version 1, which has estimates only.
-- Parsers recognize their format from the result's shape, not from which button ran it, so a
-  hand-typed `EXPLAIN ANALYZE` gets the plan view too. Formats without a parser fall back to the
-  server's raw text.
-- The statement's time is the longest any step reports, not the root's. MySQL 8.0.18 reports
-  48 µs for the limit above a union whose materialization took 12.3 ms. Summing the steps
-  below instead overcounts: a dependent subquery's 4 ms already sits inside the branch that
-  calls it, and the sum came to 18.6 ms. The summary, the tree's bar scale and the flame
-  chart's shares all use this one number.
-- Cost bars in an estimated plan span the steps below a step when those cost more than the
-  step counts. MySQL leaves every temporary table's cost out of the steps that read it, so
-  on the 9.7 union query the limit costs 2.85 while its two branches cost 757 and 31,389. Scaled
-  to the costliest step, nearly every bar was empty, the limit's included. The solid part of
-  a bar stays the server's own number and a paler part covers what the steps below cost, so the
-  top steps fill and every branch keeps its true share. Two other rules were tried. Scaling each
-  step to the top of its own cost region made both union branches full, which hid a 20×
-  difference between them. Bars on table reads alone, scaled to the costliest read, compare a
-  nested loop's per-loop lookup costs with whole scans. A log scale was ruled out earlier
-  because it overstates small branches. PostgreSQL's costs already include the steps below, so
-  its bars don't change.
+- **One model.** Every parser fills the same tree of steps, and inclusive time, self time and the
+  estimate ratio are derived in core, so the views never branch on the engine. Parsers recognize
+  their format from the result's shape, so a hand-typed `EXPLAIN` gets the plan view too.
+- **Which statement to send** is a table of rules by engine, mode and minimum version. MySQL 8.4
+  and later explain through JSON format version 2 rather than TREE text, because it keeps tables,
+  indexes and conditions as separate fields at full precision. That costs a statement that sets
+  the format and one that puts the session's own setting back.
+- **Explain Analyze never writes.** It shows the estimated plan, with a note, for any statement but
+  a query and where the server can't measure (MySQL before 8.0.18, SQLite before 3.42). The rest
+  runs in a read-only session, because a query can still write through a function such as
+  `nextval`. `Connection::explain` holds the connection from the setup to the reset, so another
+  tab's statement never lands in that session, and a failed reset is shown in Messages.
+- **The statement's time is the longest any step reports**, not the root's: MySQL 8.0.18 can report
+  microseconds for a limit above a union that took milliseconds to materialize.
 
 ## Explain Analyze on SQLite
 
-SQLite has no `EXPLAIN ANALYZE`. Its C API can report what each plan step did once a statement
-has run: `sqlite3_stmt_scanstatus_v2` gives, for every `EXPLAIN QUERY PLAN` step, its loops
-(`NLOOP`), rows visited (`NVISIT`), the planner's rows per loop (`EST`) and counter ticks
-(`NCYCLE`). Explain Analyze on SQLite 3.42 and later reads it.
+SQLite has no `EXPLAIN ANALYZE`, but once a statement has run, `sqlite3_stmt_scanstatus_v2` reports
+the loops, rows visited, estimate and counter ticks of each `EXPLAIN QUERY PLAN` step.
 
-- **Build flag.** The API exists only when SQLite is compiled with
-  `SQLITE_ENABLE_STMT_SCANSTATUS`, and the bundled library isn't by default. `.cargo/config.toml`
-  passes it to `libsqlite3-sys` through `LIBSQLITE3_FLAGS`, so every cargo command run in the
-  repository gets it: build, test, run, `scripts/bundle-macos.sh` and CI. Cargo rebuilds the
-  library when the variable changes, and a test reads `PRAGMA compile_options` to prove the
-  running library has it. A build without the flag fails to link, so the feature can't go missing
-  quietly. The connection still checks the compile option and the per-connection switch when it
-  opens, and falls back to the estimate with a note if either is missing.
-- **Collection only when measuring.** While collection is on, SQLite reads the counter around
-  every instruction of every statement. That made a self-join of `order_details` about 4% slower
-  (7.5 ms against 7.2 ms per run on an M5 Max), so a connection turns collection off when it opens
-  and on only around the measured statement.
-- **Running the statement.** The driver prepares the statement through the C API, because
-  rusqlite keeps its statement handle private, then runs it to its last row without keeping the
-  rows, adding up the time spent inside `sqlite3_step`. Stop interrupts it like any query. There
-  is no row cap: as with `EXPLAIN ANALYZE` elsewhere, the statement runs to completion, and memory
-  stays flat because no rows are kept.
-- **Write guard.** Measuring a statement runs it, so it must never change data. The request rules
-  refuse Explain Analyze for anything but a query, as on the other engines, and show the estimate
-  with a note. The driver also refuses any statement that `sqlite3_stmt_readonly` reports as
-  writing, so a statement the rules misread still never runs.
-- **Time from counter ticks.** SQLite doesn't time steps. It reads a hardware counter around each
-  instruction (the time-stamp counter on x86, the virtual timer on ARM, both ticking at a fixed
-  rate), calls the difference cycles, and sums them per step. A step's time is its share of the
-  statement's ticks, scaled to the statement's measured time in `sqlite3_step`. The plan says so:
-  its format reads "SQLite scan status (times from CPU cycles)", and a `timing` attribute gives
-  the totals.
-- **Which step a count belongs to.** A loop counts the instructions that use its own table or
-  index, and a subquery counts its whole code range, children included, so inclusive and self time
-  follow as they do for MariaDB. A co-routine reports nothing itself: the `SCAN` that reads it
-  reports the co-routine's code range instead. Those loops, rows and ticks move to the co-routine,
-  so they count once, and the scan keeps its loops and rows, untimed. Some instructions still
-  count for two steps, and the counters don't say which: a correlated subquery reads the outer
-  loop's columns inside its own range, and a sort's range can hold a select-list subquery. In the
-  lab's `portable` query the `ORDER BY` sort reports about 190,000 ticks, 167,000 of them the
-  `last_order` subquery's. The parent's self time then stays at zero. `MATERIALIZE` reports ticks
-  but no loops, so it carries no actuals.
-- **What else differs from the estimate.** `EST` is a real estimate only for `SCAN` and `SEARCH`
-  steps; SQLite reports 1 for every other step, so those get none. A measured run also reports
-  building an automatic index as a step of its own (`CREATE AUTOMATIC INDEX ON t(col)`), which
-  `EXPLAIN QUERY PLAN` never prints. It stays in the plan, because its cost is real. The plan's
-  root is always the statement, with the rows it returned and its measured time.
+- **Build flag.** The API exists only when SQLite is compiled with `SQLITE_ENABLE_STMT_SCANSTATUS`.
+  `.cargo/config.toml` passes it to every cargo command in the repository, and a build without it
+  fails to link. The connection's check of the compile option only covers a library compiled
+  without collection, where Explain Analyze falls back to the estimate.
+- **Collection only while measuring.** With collection on, SQLite reads the counter around every
+  instruction: a self-join of `order_details` ran about 4% slower (7.5 ms against 7.2 ms on an M5
+  Max). A connection turns it off when it opens and on only around the measured statement.
+- **A second write guard.** The driver refuses any statement that `sqlite3_stmt_readonly` reports
+  as writing, so one the request rules misread still never runs.
+- **Times are shares of ticks.** SQLite doesn't time steps. A step's time is its share of the
+  statement's ticks, scaled to the time spent in `sqlite3_step`, and the plan's format says so.
 
 ## Scope cuts
 

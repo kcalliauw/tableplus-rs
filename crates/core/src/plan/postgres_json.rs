@@ -46,7 +46,7 @@ fn parse_text(text: &str) -> Result<Plan, String> {
         [one] => {
             let root = root_of(one)?;
             let mut plan = Plan::new(PlanFormat::PostgresJson, node(root)?, text);
-            add_children(&mut plan, NodeId::ROOT, root)?;
+            add_children(&mut plan, NodeId::ROOT, root, 1)?;
             plan
         }
         // A rule can turn one statement into several, each with its own plan.
@@ -55,7 +55,7 @@ fn parse_text(text: &str) -> Result<Plan, String> {
             for statement in many {
                 let root = root_of(statement)?;
                 let id = plan.add_child(NodeId::ROOT, node(root)?);
-                add_children(&mut plan, id, root)?;
+                add_children(&mut plan, id, root, 1)?;
             }
             plan
         }
@@ -93,23 +93,25 @@ fn root_of(statement: &Object) -> Result<&Object, String> {
     statement.get("Plan").and_then(Json::as_object).ok_or_else(|| "a statement has no \"Plan\" object".into())
 }
 
-fn add_children(plan: &mut Plan, parent: NodeId, object: &Object) -> Result<(), String> {
+/// Adds `object`'s children below `parent`. `runs` is how many times the Gather above ran, 1
+/// outside one.
+fn add_children(plan: &mut Plan, parent: NodeId, object: &Object, runs: u64) -> Result<(), String> {
     let gather = matches!(object.get("Node Type").and_then(Json::as_str), Some("Gather" | "Gather Merge"));
-    let runs = plan.node(parent).actual.map_or(1, |a| a.loops.max(1));
+    let runs = if gather { plan.node(parent).actual.map_or(1, |a| a.loops.max(1)) } else { runs };
     for child in object.get("Plans").and_then(Json::as_array).into_iter().flatten() {
         let child = child.as_object().ok_or("an entry of \"Plans\" is not an object")?;
         let mut node = node(child)?;
         // Each time a Gather runs, its input runs once in every process, and the steps below
-        // share those processes. A step with fewer loops ran in fewer of them, such as a branch
-        // of a Parallel Append.
+        // share those processes. A step with fewer loops per run ran in fewer of them, such as a
+        // branch of a Parallel Append.
         let processes = match node.actual {
             Some(actual) if gather => actual.loops / runs,
-            Some(actual) => u64::from(plan.node(parent).processes).min(actual.loops),
+            Some(actual) => u64::from(plan.node(parent).processes).min(actual.loops.div_ceil(runs)),
             None => plan.node(parent).processes.into(),
         };
         node.processes = processes.clamp(1, u32::MAX.into()) as u32;
         let id = plan.add_child(parent, node);
-        add_children(plan, id, child)?;
+        add_children(plan, id, child, runs)?;
     }
     Ok(())
 }
@@ -429,15 +431,19 @@ mod tests {
                      {"Node Type": "Append", "Parallel Aware": true, "Actual Total Time": 4, "Actual Rows": 1,
                       "Actual Loops": 15, "Plans": [
                         {"Node Type": "Seq Scan", "Relation Name": "b", "Actual Total Time": 3,
-                         "Actual Rows": 1, "Actual Loops": 1}]}]}]}}]"#,
+                         "Actual Rows": 1, "Actual Loops": 1},
+                        {"Node Type": "Seq Scan", "Relation Name": "c", "Actual Total Time": 0.29,
+                         "Actual Rows": 1, "Actual Loops": 5}]}]}]}}]"#,
         )
         .unwrap();
-        let (gather, append, branch) = (NodeId(2), NodeId(3), NodeId(4));
+        let (gather, append, branch, each_run) = (NodeId(2), NodeId(3), NodeId(4), NodeId(5));
         assert_eq!(plan.node(gather).processes, 1);
         assert_eq!(plan.node(append).processes, 3, "15 loops over the Gather's 5 runs");
         assert!((plan.inclusive_ms(append).unwrap() - 20.0).abs() < 1e-9);
         assert_eq!(plan.node(branch).processes, 1, "a branch one process ran keeps its own time");
         assert_eq!(plan.inclusive_ms(branch), Some(3.0));
+        assert_eq!(plan.node(each_run).processes, 1, "one process ran it once per Gather run");
+        assert!((plan.inclusive_ms(each_run).unwrap() - 1.45).abs() < 1e-9);
     }
 
     #[test]

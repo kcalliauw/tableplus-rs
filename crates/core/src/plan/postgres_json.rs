@@ -65,9 +65,16 @@ fn root_of(statement: &Object) -> Result<&Object, String> {
 }
 
 fn add_children(plan: &mut Plan, parent: NodeId, object: &Object) -> Result<(), String> {
+    let gather = matches!(object.get("Node Type").and_then(Json::as_str), Some("Gather" | "Gather Merge"));
     for child in object.get("Plans").and_then(Json::as_array).into_iter().flatten() {
         let child = child.as_object().ok_or("an entry of \"Plans\" is not an object")?;
-        let id = plan.add_child(parent, node(child)?);
+        let mut node = node(child)?;
+        // A Gather's input runs once in each process, and every step below it shares them.
+        node.processes = match node.actual {
+            Some(actual) if gather => actual.loops.clamp(1, u32::MAX.into()) as u32,
+            _ => plan.node(parent).processes,
+        };
+        let id = plan.add_child(parent, node);
         add_children(plan, id, child)?;
     }
     Ok(())
@@ -354,6 +361,26 @@ mod tests {
         );
         assert!(plan.analyzed());
         assert_eq!(plan.raw, SUBPLANS);
+    }
+
+    #[test]
+    fn parallel_workers_share_the_time_below_a_gather() {
+        let plan = parse_text(
+            r#"[{"Plan": {"Node Type": "Gather", "Workers Launched": 2, "Actual Total Time": 681.482,
+                "Actual Rows": 3, "Actual Loops": 1, "Plans": [
+                  {"Node Type": "Aggregate", "Partial Mode": "Partial", "Actual Total Time": 653.620,
+                   "Actual Rows": 1, "Actual Loops": 3, "Plans": [
+                     {"Node Type": "Seq Scan", "Parallel Aware": true, "Relation Name": "t",
+                      "Actual Total Time": 1.658, "Actual Rows": 16667, "Actual Loops": 3}]}]},
+               "Execution Time": 689.683}]"#,
+        )
+        .unwrap();
+        let partial = NodeId(1);
+        assert_eq!(plan.node(partial).processes, 3);
+        assert_eq!(plan.node(NodeId(2)).processes, 3, "steps below the Gather's input share its processes");
+        assert!((plan.inclusive_ms(partial).unwrap() - 653.62).abs() < 1e-9);
+        assert!(plan.inclusive_ms(partial) < plan.inclusive_ms(NodeId::ROOT));
+        assert_eq!(plan.total_ms(), Some(681.482));
     }
 
     #[test]

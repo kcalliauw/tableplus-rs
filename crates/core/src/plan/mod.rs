@@ -128,6 +128,9 @@ pub struct PlanNode {
     pub condition: Option<String>,
     pub estimate: Option<Estimate>,
     pub actual: Option<Actual>,
+    /// How many processes ran the loops side by side: PostgreSQL's parallel workers and leader
+    /// below a Gather, else 1.
+    pub processes: u32,
     /// Everything the engine reported for this node, in its order and wording.
     pub attributes: Vec<Attribute>,
     parent: Option<NodeId>,
@@ -153,6 +156,7 @@ impl PlanNode {
             condition: None,
             estimate: None,
             actual: None,
+            processes: 1,
             attributes: Vec::new(),
             parent: None,
             children: Vec::new(),
@@ -256,10 +260,11 @@ impl Plan {
     }
 
     /// Milliseconds spent in the node and its children over all loops: the time to the last row
-    /// per loop, times the loop count.
+    /// per loop, times the loop count, shared among the processes that ran them.
     pub fn inclusive_ms(&self, id: NodeId) -> Option<f64> {
-        let actual = self.node(id).actual?;
-        Some(actual.time?.last_row_ms * actual.loops as f64)
+        let node = self.node(id);
+        let actual = node.actual?;
+        Some(actual.time?.last_row_ms * actual.loops as f64 / node.processes as f64)
     }
 
     /// Milliseconds spent in the node itself: its inclusive time minus its children's, never

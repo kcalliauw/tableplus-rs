@@ -10,7 +10,7 @@ use common::*;
 use tableplus_core::config::SslMode;
 use tableplus_core::driver::{self, DynConnection};
 use tableplus_core::model::{ConstraintKind, ObjectKind};
-use tableplus_core::plan::ExplainMode;
+use tableplus_core::plan::{self, ExplainMode};
 use tableplus_core::sqlgen::{self, Filter, FilterOp, SortKey};
 use tableplus_core::{Flavor, StatementResult, Value};
 
@@ -260,8 +260,18 @@ async fn exercise_explain_transactions(conn: &DynConnection, touch: &str, table:
 /// A statement over half of `max_allowed_packet` explains, and the connection stays open.
 async fn exercise_explain_large_statement(conn: &DynConnection) {
     let packet = driver::scalar(conn.as_ref(), "SELECT @@max_allowed_packet").await.unwrap().unwrap();
-    let length = packet.parse::<usize>().unwrap() * 6 / 10;
-    explain(conn, &format!("SELECT LENGTH('{}')", "a".repeat(length)), ExplainMode::Estimate).await;
+    let packet = packet.parse::<usize>().unwrap();
+    let select = |length: usize| format!("SELECT LENGTH('{}')", "a".repeat(length));
+    explain(conn, &select(packet * 6 / 10), ExplainMode::Estimate).await;
+    assert!(conn.query("SELECT 1", None).await.is_ok(), "the connection stays open");
+
+    // A plan request one byte short of the limit leaves no room for the query packet's command byte.
+    let server = conn.server_info();
+    let prefix = plan::request(&server, &select(0), ExplainMode::Estimate).unwrap().explain.sql().len();
+    let req = plan::request(&server, &select(packet - 1 - prefix), ExplainMode::Estimate).unwrap();
+    assert_eq!(req.explain.sql().len(), packet - 1);
+    let err = conn.explain(&req).await.unwrap_err().to_string();
+    assert!(err.contains("max_allowed_packet"), "{err}");
     assert!(conn.query("SELECT 1", None).await.is_ok(), "the connection stays open");
 }
 

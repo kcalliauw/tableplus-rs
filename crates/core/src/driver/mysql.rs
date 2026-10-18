@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use async_trait::async_trait;
 use futures_util::FutureExt;
 use mysql_async::consts::{ColumnFlags, ColumnType, StatusFlags};
@@ -181,18 +181,26 @@ fn s(v: &Option<String>) -> String {
 /// and sql_mode, as it reads the statement itself; `mysql_async`'s own prepare first scans for
 /// parameters with backslash escapes, and fails under NO_BACKSLASH_ESCAPES.
 async fn prepare(conn: &mut Conn, sql: &str) -> Result<()> {
-    let prepared = stage_and_prepare(conn, sql.as_bytes()).await;
+    // A packet over max_allowed_packet closes the connection. The query packet adds a command
+    // byte to the text, and hex doubles it, so it is checked first and staged in pieces.
+    let packet: u64 =
+        conn.query_first("SELECT @@max_allowed_packet").await.map_err(my_error)?.context("no max_allowed_packet")?;
+    let packet = usize::try_from(packet).unwrap_or(usize::MAX);
+    ensure!(
+        sql.len() + 2 <= packet,
+        "The plan request is {} bytes, more than the server's max_allowed_packet of {packet} bytes allows.",
+        sql.len()
+    );
+    let chunk = (packet.saturating_sub(128) / 2).clamp(1, 256 * 1024);
+    let prepared = stage_and_prepare(conn, sql.as_bytes(), chunk).await;
     conn.query_drop("SET @tableplus_explain_sql = NULL").await.map_err(my_error)?;
     prepared.map_err(my_error)?;
     conn.query_drop("DEALLOCATE PREPARE tableplus_explain").await.map_err(my_error)
 }
 
-/// Hex doubles the text, and a packet over `max_allowed_packet` (4 MiB on MySQL 5.7) closes the
-/// connection, so the text goes over in pieces.
-async fn stage_and_prepare(conn: &mut Conn, sql: &[u8]) -> mysql_async::Result<()> {
-    const CHUNK: usize = 256 * 1024;
+async fn stage_and_prepare(conn: &mut Conn, sql: &[u8], chunk: usize) -> mysql_async::Result<()> {
     conn.query_drop("SET @tableplus_explain_sql = X''").await?;
-    for chunk in sql.chunks(CHUNK) {
+    for chunk in sql.chunks(chunk) {
         let hex: String = chunk.iter().map(|b| format!("{b:02X}")).collect();
         conn.query_drop(format!("SET @tableplus_explain_sql = CONCAT(@tableplus_explain_sql, X'{hex}')")).await?;
     }

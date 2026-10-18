@@ -504,8 +504,7 @@ pub fn statement_at(src: &str, cursor: usize, dialect: Dialect) -> Option<Statem
     best.or_else(|| stmts.into_iter().next())
 }
 
-/// Removes a trailing `;` and whitespace.
-/// Only ASCII whitespace ends a statement: a trailing no-break space belongs to the last name.
+/// Removes a trailing `;` and ASCII whitespace; a trailing no-break space belongs to the last name.
 pub fn trim_statement(sql: &str) -> &str {
     sql.trim_start().trim_end_matches(is_space).trim_end_matches(';').trim_end_matches(is_space)
 }

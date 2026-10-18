@@ -96,13 +96,8 @@ const fn json_v2(mode: ExplainMode, prefix: &'static str) -> Rule {
 }
 
 /// What makes an Explain Analyze read-only and undoes it. The statement check below only sees the
-/// statement's shape, and a query can still write through a function such as `nextval`.
-///
-/// PostgreSQL runs it in a transaction of its own that is rolled back. On MySQL and MariaDB,
-/// starting a transaction would release the session's `LOCK TABLES` locks, so the session's
-/// read-only and autocommit settings are saved and turned off instead: the statement opens a
-/// read-only transaction, and the rollback undoes what read-only allows, such as writes to InnoDB
-/// temporary tables, whatever `completion_type` says. Both settings are put back afterwards.
+/// statement's shape, and a query can still write through a function such as `nextval`. MySQL and
+/// MariaDB avoid START TRANSACTION, which would release `LOCK TABLES` locks.
 const fn read_only(flavor: Flavor) -> (&'static [&'static str], &'static [&'static str]) {
     match flavor {
         Flavor::Postgres => (&["BEGIN READ ONLY"], &["ROLLBACK"]),

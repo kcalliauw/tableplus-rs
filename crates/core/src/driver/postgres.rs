@@ -233,9 +233,9 @@ async fn stream(
     Ok((has_rows, affected))
 }
 
-/// The first statement of a transaction starts it, so a later one has a later timestamp. The
-/// simple protocol sends the query as one message; the extended one stamps parse and execute
-/// apart. An aborted transaction refuses the query but is still open.
+/// A later statement in a transaction has a later timestamp than the transaction. The simple
+/// protocol stamps the query once; the extended one stamps parse and execute apart. An aborted
+/// transaction refuses the query but is still open.
 async fn in_transaction(client: &Client) -> Result<bool> {
     let messages = match client.simple_query("SELECT transaction_timestamp() <> statement_timestamp()").await {
         Ok(messages) => messages,

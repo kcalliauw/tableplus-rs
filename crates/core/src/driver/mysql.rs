@@ -175,14 +175,12 @@ fn s(v: &Option<String>) -> String {
     v.clone().unwrap_or_default()
 }
 
-/// Prepares `sql` on the server and drops it. PREPARE takes a single statement, and MySQL 5.6 to
-/// 9.7 and MariaDB 10.6 to 11.8 prepare every EXPLAIN form the plan requests use. The text goes
-/// in as a binary hex literal, so the server reads its bytes in the connection's character set
-/// and sql_mode, as it reads the statement itself; `mysql_async`'s own prepare first scans for
-/// parameters with backslash escapes, and fails under NO_BACKSLASH_ESCAPES.
+/// Prepares `sql` on the server and drops it. The text goes in as a hex literal, so the server
+/// reads it in the session's character set and sql_mode; `mysql_async`'s own prepare fails under
+/// NO_BACKSLASH_ESCAPES.
 async fn prepare(conn: &mut Conn, sql: &str) -> Result<()> {
-    // A packet over max_allowed_packet closes the connection. The query packet adds a command
-    // byte to the text, and hex doubles it, so it is checked first and staged in pieces.
+    // A packet over max_allowed_packet closes the connection, and hex doubles the text, so it is
+    // checked first and staged in pieces.
     let packet: u64 =
         conn.query_first("SELECT @@max_allowed_packet").await.map_err(my_error)?.context("no max_allowed_packet")?;
     let packet = usize::try_from(packet).unwrap_or(usize::MAX);

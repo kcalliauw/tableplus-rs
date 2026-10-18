@@ -98,9 +98,8 @@ impl QueryTab {
         }
     }
 
-    /// Each statement without leading whitespace. The tokenizer reads a no-break space as part of a
-    /// name, as the servers do, and indentation pasted from a web page often has them; at the end
-    /// one belongs to the last name, so only the start is trimmed.
+    /// Each statement without leading whitespace, no-break spaces pasted from a web page included.
+    /// The end keeps them: there one belongs to the last name.
     fn statements_to_run(&self, dialect: Dialect, all: bool) -> Vec<String> {
         let (src, spans) = if let Some((a, b)) = self.selection.filter(|_| !all) {
             let sel = &self.sql[a.min(self.sql.len())..b.min(self.sql.len())];

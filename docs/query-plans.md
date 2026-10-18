@@ -19,11 +19,17 @@ On MySQL 8.4 and later, a setup statement saves the session's `explain_json_form
 Explain Analyze runs the statement read-only, so a function that writes, such as `nextval`, fails:
 
 - **PostgreSQL** runs it in `BEGIN READ ONLY` and rolls back, which also undoes writes to temporary tables.
-- **MySQL and MariaDB** save the session's `transaction_read_only` (MariaDB: `tx_read_only`, the only name it knows before 11.1) and `autocommit` in user variables, turn read-only on and autocommit off, and put both back afterwards. The statement then opens a read-only transaction, and `ROLLBACK AND NO CHAIN NO RELEASE` undoes what read-only allows, such as writes to InnoDB temporary tables, whatever `completion_type` says. A `START TRANSACTION` would release the session's `LOCK TABLES` locks.
+- **MySQL and MariaDB** turn on `transaction_read_only` (MariaDB before 11.1: `tx_read_only`) and turn off `autocommit`, so the statement opens a read-only transaction. `ROLLBACK AND NO CHAIN NO RELEASE` then undoes writes to InnoDB temporary tables, whatever `completion_type` says, and both settings are put back. `START TRANSACTION` isn't used because it would release `LOCK TABLES` locks.
 
-Neither reaches a transaction the session already has open: PostgreSQL would run the statement in the user's transaction, and MySQL's setting only applies to the next one. So the driver checks first, with MySQL's `SERVER_STATUS_IN_TRANS` flag after a `DO 0` and, on PostgreSQL, whether `transaction_timestamp()` differs from `statement_timestamp()` or the transaction has aborted. With a transaction open, Explain Analyze asks the user to commit or roll back.
+Neither reaches a transaction the session already has open, so with one open, Explain Analyze asks the user to commit or roll back.
 
-Some effects outlast the statement, and Explain Analyze doesn't block them: PostgreSQL's temporary sequences and session advisory locks, and on MySQL and MariaDB user variables, named locks (`GET_LOCK`) and writes to non-transactional temporary tables, such as MEMORY, MyISAM, Aria, ARCHIVE or CSV, which no rollback undoes. On MySQL and MariaDB it also uses up a pending `SET TRANSACTION` meant for the next transaction, which no variable shows, so it can't be put back. Explain uses the user variables `@tableplus_explain_read_only`, `@tableplus_explain_autocommit`, `@tableplus_explain_json_format` and `@tableplus_explain_sql` and the prepared statement `tableplus_explain`, and overwrites a session's own objects with those names.
+Explain Analyze doesn't block effects that outlast the statement:
+
+- PostgreSQL's temporary sequences and session advisory locks.
+- MySQL and MariaDB user variables, `GET_LOCK` locks, and writes to non-transactional temporary tables (MEMORY, MyISAM, Aria, ARCHIVE, CSV).
+- A pending `SET TRANSACTION` on MySQL and MariaDB, which the statement uses up and no variable shows.
+
+Explain overwrites a session's own user variables `@tableplus_explain_read_only`, `@tableplus_explain_autocommit`, `@tableplus_explain_json_format` and `@tableplus_explain_sql`, and its prepared statement `tableplus_explain`.
 
 `Connection::explain` runs the setup, the plan request and the reset while it holds the connection, so no other statement on that connection runs in between. The reset runs even when the plan request fails, and a failed reset statement is reported with the plan.
 
@@ -31,9 +37,9 @@ Explain Analyze shows the estimate instead of running anything but a query. The 
 
 The check has to read the statement the way the server does:
 
-- **One statement.** A plain query runs every statement in its text, so Explain refuses text that splits into more than one, and the driver prepares the plan request before running it. The prepared-statement protocol takes a single statement, so the server refuses a second one the tokenizer missed. MySQL 5.6 to 9.7, MariaDB 10.6 to 11.8 and PostgreSQL 12 to 18 prepare every EXPLAIN form the requests use.
+- **One statement.** Explain refuses text that splits into more than one statement. The driver also prepares the plan request before running it, and the server refuses to prepare a second statement the tokenizer missed.
 - **Comments.** MySQL starts a `--` comment only before an ASCII space or control character, so `1 --1` is arithmetic there, and PostgreSQL nests block comments. Explain Analyze refuses MySQL's `/*! … */` comments, whose text the server runs as part of the statement.
-- **Characters.** In a UTF-8 session all three servers read a non-ASCII character, a no-break space included, as part of an identifier, and so does the tokenizer. In other character sets, such as GBK, the server can split the bytes differently, which the prepare step catches: on MySQL and MariaDB the text goes to `PREPARE` as a binary hex literal, in pieces sized from the server's `max_allowed_packet`, which a plan request too large for it is refused against before anything is sent, and the server reads it in the session's character set and `sql_mode`, as it reads the statement itself.
+- **Characters.** The tokenizer reads every non-ASCII character, a no-break space included, as part of an identifier, as the servers do in UTF-8. Other character sets, such as GBK, can split the bytes differently, which the prepare step catches. On MySQL and MariaDB the text reaches `PREPARE` as a hex literal, so the server reads it in the session's character set and `sql_mode`. A plan request larger than `max_allowed_packet` is refused before anything is sent.
 - **SQLite PRAGMAs** are never explained, because SQLite applies some of them while preparing the statement, even under `EXPLAIN QUERY PLAN`.
 
 ## Formats
@@ -42,7 +48,7 @@ The check has to read the statement the way the server does:
 - **MySQL JSON version 1** nests query blocks, the operations around them (ordering, grouping, windowing) and the tables they read. It has estimates only, and costs from 5.7 on. A table's estimate is the rows it examines per scan, at its own read and evaluation cost; its `prefix_cost` belongs to the join it ends.
 - **MySQL JSON version 2** nests the same iterators as TREE through `inputs`, with actuals under `EXPLAIN ANALYZE`. A `heading` such as `Hash` becomes a node of its own, as TREE prints it on a line of its own. On every pair the lab captured, version 2 lists the same steps as TREE, and it keeps the table, schema, used columns, index, lookup and filter conditions and join algorithm as separate fields, at full precision where TREE rounds to three digits.
 - **MariaDB JSON** holds a `query_block`. From 10.11 on a join is a `nested_loop` array; in 10.6 it is a run of repeated `table` keys in one object, so objects are read with duplicate keys kept, in order.
-- **PostgreSQL JSON** is an array with one object per statement. Each has a `Plan` tree, whose children sit in `Plans`, beside plan-wide values such as `Planning Time` and `Triggers`. Below a `Gather`, each parallel worker and the leader counts as a loop, so a step's time over all its loops is divided by the number of processes that ran the Gather's input. serde_json stops at 128 nesting levels, which a 100-table join passes, so the parser reads without that limit up to 256 levels.
+- **PostgreSQL JSON** is an array with one object per statement. Each has a `Plan` tree, whose children sit in `Plans`, beside plan-wide values such as `Planning Time` and `Triggers`. Below a `Gather`, each worker and the leader counts as a loop, so a step's total time is divided by the processes that ran it. Plans parse up to 256 JSON levels deep, enough for a 100-table join.
 - **SQLite's query plan** is one row per step, with `id`, `parent`, `notused` and `detail`. It has no estimates and no actuals.
 - **SQLite's scan status** is what the driver returns for a measured run: a row for the statement, with the rows it returned and the time spent in `sqlite3_step`, then one per plan step with SQLite's `NLOOP`, `NVISIT`, `EST` and `NCYCLE`.
 

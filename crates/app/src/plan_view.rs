@@ -40,9 +40,13 @@ impl PlanContent {
         }
     }
 
-    /// A plan for a result that reads as one, such as a hand-typed `EXPLAIN ANALYZE`. Ordinary
-    /// results that only look like a plan, such as a JSON value, stay rows.
-    pub fn detected(server: &ServerInfo, rows: &ResultSet) -> Option<Self> {
+    /// A plan for the result of a statement that asks for one, such as a hand-typed
+    /// `EXPLAIN ANALYZE`. Ordinary results that only look like a plan, such as a JSON value,
+    /// stay rows.
+    pub fn detected(server: &ServerInfo, sql: &str, rows: &ResultSet) -> Option<Self> {
+        if !plan::asks_for_plan(server, sql) {
+            return None;
+        }
         plan::parse(server, rows)?.ok().map(|plan| PlanContent::Tree(Box::new(plan)))
     }
 }
@@ -449,8 +453,14 @@ mod tests {
         };
         let postgres = ServerInfo::new(Flavor::Postgres, Version::new(17, 6, 0));
         let mariadb = ServerInfo::new(Flavor::MariaDb, Version::new(11, 8, 0));
-        assert!(PlanContent::detected(&postgres, &one_cell("json_agg", "[1,2,3]")).is_none());
-        assert!(PlanContent::detected(&mariadb, &one_cell("doc", r#"{"customer_id":1}"#)).is_none());
+        let mysql = ServerInfo::new(Flavor::MySql, Version::new(8, 4, 0));
+        assert!(PlanContent::detected(&postgres, "select 1", &one_cell("json_agg", "[1,2,3]")).is_none());
+        assert!(PlanContent::detected(&mariadb, "select 1", &one_cell("doc", r#"{"customer_id":1}"#)).is_none());
+        let plan_shaped = one_cell("payload", r#"{"operation": "refund", "access_type": "table"}"#);
+        assert!(PlanContent::detected(&mysql, "select payload from t", &plan_shaped).is_none());
+        let tree = one_cell("EXPLAIN", "-> Table scan on t  (cost=0.35 rows=1)");
+        assert!(PlanContent::detected(&mysql, "explain format=tree select * from t", &tree).is_some());
+        assert!(PlanContent::detected(&mysql, "select '-> Table scan on t  (cost=0.35 rows=1)'", &tree).is_none());
         let explained = PlanContent::explained(&postgres, &one_cell("QUERY PLAN", "[1,2,3]"), PlanFormat::PostgresJson);
         assert!(matches!(explained, PlanContent::Raw { .. }), "an explicit Explain still shows the server's text");
     }

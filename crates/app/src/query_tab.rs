@@ -145,7 +145,7 @@ impl QueryTab {
                     Ok(Step::Run) => {
                         let result = driver::run(conn.as_ref(), &job.sql, limit).await.map_err(|e| format!("{e:#}"));
                         let plan = match &result {
-                            Ok(out) => out.rows().and_then(|rs| PlanContent::detected(&server, rs)),
+                            Ok(out) => out.rows().and_then(|rs| PlanContent::detected(&server, &job.sql, rs)),
                             Err(_) => None,
                         };
                         (result, plan)

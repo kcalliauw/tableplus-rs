@@ -154,10 +154,10 @@ The integration tests (`crates/core/tests/`) run against the real servers: intro
 schemas/tables/views/routines/indexes/constraints, every column type round-tripping through the
 grid's text representation, staged edits committed and rolled back, `ALTER` generation applied to
 real tables, CSV import, streaming 250,000 rows, query cancellation, TLS, and connecting through the
-SSH bastion. `explain_goldens.rs` parses EXPLAIN output captured from 18 server versions by the
-separate EXPLAIN lab (`tableplus-rs-explain-lab`, checked out next to this repository or named by
-`TABLEPLUS_EXPLAIN_LAB`); without it those tests skip. CI (`.github/workflows/ci.yml`) runs rustfmt, clippy with `-D warnings` and the full
-suite against the docker databases on Linux, and builds, unit-tests and bundles the app on macOS.
+SSH bastion, plus Explain and Explain Analyze on each engine. `plan_fixtures.rs` parses plans from
+the server versions the stack doesn't run, kept in `crates/core/tests/fixtures/explain/`. CI
+(`.github/workflows/ci.yml`) runs rustfmt, clippy with `-D warnings` and the full suite against the
+docker databases on Linux, and builds, unit-tests and bundles the app on macOS.
 
 ## Performance
 

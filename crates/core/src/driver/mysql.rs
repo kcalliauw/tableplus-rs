@@ -4,18 +4,20 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
+use futures_util::FutureExt;
 use mysql_async::consts::{ColumnFlags, ColumnType};
 use mysql_async::prelude::Queryable;
 use mysql_async::{Conn, Opts, OptsBuilder, SslOpts};
 use tokio::sync::Mutex;
 
-use super::{BatchSink, Connection};
+use super::{BatchSink, Connection, Explained, explain_with};
 use crate::config::{ConnectionConfig, Credentials, SslMode};
 use crate::dialect::Dialect;
 use crate::model::{
     ColumnInfo, ColumnMeta, ConstraintInfo, ConstraintKind, IndexInfo, ObjectKind, ResultSet, Row, SchemaObject,
     StatementResult, TableStructure,
 };
+use crate::plan::ExplainStatements;
 use crate::server::{Flavor, ServerInfo};
 use crate::tunnel::{SshTunnel, open_tunnel};
 use crate::value::Value;
@@ -171,6 +173,38 @@ fn to_value(v: Option<mysql_async::Value>, t: ColumnType, flags: ColumnFlags, ch
 
 fn s(v: &Option<String>) -> String {
     v.clone().unwrap_or_default()
+}
+
+async fn query_on(conn: &mut Conn, sql: &str, max_rows: Option<usize>) -> Result<StatementResult> {
+    let mut result = conn.query_iter(sql).await.map_err(my_error)?;
+    let columns = result.columns().filter(|c| !c.is_empty());
+    let Some(columns) = columns else {
+        let affected = result.affected_rows();
+        result.drop_result().await.map_err(my_error)?;
+        return Ok(StatementResult::Affected(affected));
+    };
+    let meta: Vec<ColumnMeta> = columns
+        .iter()
+        .map(|c| ColumnMeta::new(c.name_str(), type_label(c.column_type(), c.flags(), c.character_set())))
+        .collect();
+    let limit = max_rows.unwrap_or(usize::MAX);
+    let mut rows: Vec<Row> = Vec::new();
+    let mut truncated = false;
+    while let Some(row) = result.next().await.map_err(my_error)? {
+        if rows.len() >= limit {
+            truncated = true;
+            continue; // keep draining so the connection stays usable
+        }
+        let row: Row = row
+            .unwrap_raw()
+            .into_iter()
+            .zip(columns.iter())
+            .map(|(v, c)| to_value(v, c.column_type(), c.flags(), c.character_set()))
+            .collect();
+        rows.push(row);
+    }
+    result.drop_result().await.map_err(my_error)?;
+    Ok(StatementResult::Rows(ResultSet { columns: meta, rows, truncated }))
 }
 
 impl MyConnection {
@@ -506,36 +540,7 @@ impl Connection for MyConnection {
     }
 
     async fn query(&self, sql: &str, max_rows: Option<usize>) -> Result<StatementResult> {
-        let mut conn = self.conn.lock().await;
-        let mut result = conn.query_iter(sql).await.map_err(my_error)?;
-        let columns = result.columns().filter(|c| !c.is_empty());
-        let Some(columns) = columns else {
-            let affected = result.affected_rows();
-            result.drop_result().await.map_err(my_error)?;
-            return Ok(StatementResult::Affected(affected));
-        };
-        let meta: Vec<ColumnMeta> = columns
-            .iter()
-            .map(|c| ColumnMeta::new(c.name_str(), type_label(c.column_type(), c.flags(), c.character_set())))
-            .collect();
-        let limit = max_rows.unwrap_or(usize::MAX);
-        let mut rows: Vec<Row> = Vec::new();
-        let mut truncated = false;
-        while let Some(row) = result.next().await.map_err(my_error)? {
-            if rows.len() >= limit {
-                truncated = true;
-                continue; // keep draining so the connection stays usable
-            }
-            let row: Row = row
-                .unwrap_raw()
-                .into_iter()
-                .zip(columns.iter())
-                .map(|(v, c)| to_value(v, c.column_type(), c.flags(), c.character_set()))
-                .collect();
-            rows.push(row);
-        }
-        result.drop_result().await.map_err(my_error)?;
-        Ok(StatementResult::Rows(ResultSet { columns: meta, rows, truncated }))
+        query_on(&mut *self.conn.lock().await, sql, max_rows).await
     }
 
     async fn query_batches(&self, sql: &str, batch: usize, sink: &mut BatchSink<'_>) -> Result<u64> {
@@ -600,6 +605,10 @@ impl Connection for MyConnection {
         }
         conn.query_drop("COMMIT").await.map_err(my_error)?;
         Ok(total)
+    }
+
+    async fn explain(&self, req: &ExplainStatements) -> Result<Explained> {
+        explain_with(&mut *self.conn.lock().await, req, |conn, sql| query_on(conn, sql, None).boxed()).await
     }
 
     async fn cancel(&self) -> Result<()> {

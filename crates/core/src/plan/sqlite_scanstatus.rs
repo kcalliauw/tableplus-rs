@@ -1,7 +1,6 @@
 //! What SQLite measured for each plan step while a statement ran, read by the SQLite driver
-//! through `sqlite3_stmt_scanstatus_v2`. One row per `EXPLAIN QUERY PLAN` step, with the
-//! counters SQLite calls `NLOOP`, `NVISIT`, `EST` and `NCYCLE`, after a first row for the whole
-//! statement, whose `nvisit` is the rows it returned:
+//! through `sqlite3_stmt_scanstatus_v2`: a row for the whole statement, whose `nvisit` is the
+//! rows it returned, then one per `EXPLAIN QUERY PLAN` step.
 //!
 //! ```text
 //! id  parent  detail          nloop  nvisit  est   ncycle   ms
@@ -11,41 +10,10 @@
 //! 66  6       SCAN t          1      830     96    653190   NULL
 //! ```
 //!
-//! A step's rows per loop are `nvisit / nloop`. `est` is the planner's rows per loop, filled in
-//! for loops (`SCAN` and `SEARCH`) only; other steps report a default of 1. A step without
-//! `nloop` carries no actuals.
-//!
-//! # Timing
-//!
-//! SQLite doesn't time steps. It reads a hardware counter around each VDBE instruction (the
-//! time-stamp counter on x86, the virtual timer on ARM), calls the difference cycles, and sums
-//! them per step. A step's time here is its share of the statement's cycles, scaled to the
-//! statement's measured time (`ms`, the time spent in `sqlite3_step`). The format label and the
-//! plan's `timing` attribute say so.
-//!
-//! What a step's `ncycle` covers depends on the step:
-//!
-//! - A loop counts the instructions that use its own table or index cursor, so a join's loops
-//!   don't overlap. Loops have no children.
-//! - A subquery counts its code range, which holds its children's code, so its time includes
-//!   theirs, as the model wants.
-//! - A co-routine reports nothing. The `SCAN` that reads it counts the co-routine's code range
-//!   instead, which holds the co-routine's children, so that time would count twice under their
-//!   common parent. The scan's loops, rows and cycles therefore move to the co-routine: the scan
-//!   starts it once per loop, and each row it visits is a row the co-routine produced. The scan
-//!   keeps its loops and rows, untimed.
-//! - `MATERIALIZE` counts its code range but no loops, so it carries no actuals. Its children
-//!   keep their times, and its own work shows as its parent's self time.
-//!
-//! Some instructions still count for two steps, and nothing in the counters says which:
-//!
-//! - A correlated subquery reads the outer loop's columns inside its own code range.
-//! - A sort's range covers the code that fills and empties it, which can compute select-list
-//!   columns, so a scalar subquery in the select list counts on the sort as well as on itself.
-//!   In the lab's `portable` query, `USE TEMP B-TREE FOR ORDER BY` reports about 190,000
-//!   cycles, of which about 167,000 are `CORRELATED SCALAR SUBQUERY 1`.
-//!
-//! The parts of a step can then add up to more than the whole, and its self time stays at zero.
+//! A step's rows per loop are `nvisit / nloop`, and its time is its share of the statement's
+//! `ncycle`, scaled to the statement's measured `ms`. `est` is an estimate only for `SCAN` and
+//! `SEARCH` steps. A co-routine reports nothing, so it takes the numbers of the `SCAN` that reads
+//! it. `docs/query-plans.md` describes which instructions each step's counters cover.
 
 use std::collections::HashMap;
 
@@ -55,7 +23,6 @@ use crate::model::ResultSet;
 use crate::server::{Flavor, ServerInfo};
 use crate::value::Value;
 
-/// The columns of a measured run, as the SQLite driver returns it.
 pub(crate) const COLUMNS: [&str; 8] = ["id", "parent", "detail", "nloop", "nvisit", "est", "ncycle", "ms"];
 
 /// The id of the statement's row. `EXPLAIN QUERY PLAN` gives top-level steps this parent.
@@ -69,7 +36,7 @@ pub(super) fn parse(server: &ServerInfo, result: &ResultSet) -> Option<Result<Pl
     Some(parse_rows(result))
 }
 
-/// What SQLite counted for a step; `None` where it reported nothing.
+/// `None` where SQLite reported nothing.
 #[derive(Debug, Clone, Copy, Default)]
 struct Counts {
     loops: Option<u64>,

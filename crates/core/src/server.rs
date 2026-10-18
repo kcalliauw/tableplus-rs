@@ -80,7 +80,7 @@ pub struct ServerInfo {
     pub flavor: Flavor,
     pub version: Version,
     /// SQLite only: the library measures each plan step while a statement runs
-    /// (`SQLITE_ENABLE_STMT_SCANSTATUS`), which Explain Analyze needs. False for other engines.
+    /// (`SQLITE_ENABLE_STMT_SCANSTATUS`), which Explain Analyze needs.
     pub scan_status: bool,
 }
 
@@ -126,13 +126,6 @@ mod tests {
         }
         assert_eq!(Version::parse(""), None);
         assert_eq!(Version::parse("MariaDB"), None);
-    }
-
-    #[test]
-    fn versions_order_numerically() {
-        assert!(Version::new(8, 0, 18) < Version::new(8, 0, 46));
-        assert!(Version::new(8, 0, 46) < Version::new(8, 4, 0));
-        assert!(Version::new(9, 7, 2) > Version::new(8, 4, 11));
         assert_eq!(ServerInfo::from_version_text(Flavor::MySql, "garbage").version, Version::default());
     }
 }

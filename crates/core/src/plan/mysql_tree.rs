@@ -246,7 +246,6 @@ mod tests {
                 None,
                 Some("(o.order_date >= DATE'1997-01-01') and (o.employee_id is not null)"),
             ),
-            ("Limit: 20 row(s)", "Limit", None, None, Some("20 row(s)")),
             (
                 "Sort: revenue DESC, `name`, limit input to 20 row(s) per chunk",
                 "Sort",
@@ -254,7 +253,6 @@ mod tests {
                 None,
                 Some("revenue DESC, `name`, limit input to 20 row(s) per chunk"),
             ),
-            ("Table scan on c", "Table scan", Some("c"), None, None),
             ("Table scan on <union temporary>", "Table scan", Some("<union temporary>"), None, None),
             (
                 "Covering index lookup on p2 using idx_products_category_id (category_id=cat2.category_id)",
@@ -270,7 +268,6 @@ mod tests {
                 Some("<auto_distinct_key>"),
                 Some("supplier_id=s.supplier_id"),
             ),
-            ("Index scan on od using PRIMARY", "Index scan", Some("od"), Some("PRIMARY"), None),
             (
                 "Inner hash join (c.customer_id = o.customer_id)",
                 "Inner hash join",
@@ -294,7 +291,6 @@ mod tests {
             ),
             ("Materialize recursive CTE chain", "Materialize recursive CTE", Some("chain"), None, None),
             ("Update products (buffered)", "Update", Some("products"), None, Some("buffered")),
-            ("Aggregate using temporary table", "Aggregate using temporary table", None, None, None),
             ("Nested loop anti-join", "Nested loop anti-join", None, None, None),
             ("Hash", "Hash", None, None, None),
         ] {

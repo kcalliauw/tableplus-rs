@@ -10,8 +10,13 @@ use common::*;
 use tableplus_core::config::SslMode;
 use tableplus_core::driver;
 use tableplus_core::model::{ConstraintKind, ObjectKind};
+use tableplus_core::plan::{self, ExplainMode};
 use tableplus_core::sqlgen::{self, Filter, FilterOp, SortKey};
 use tableplus_core::{Flavor, StatementResult, Value};
+
+/// Paid orders per country: a join, a grouping and a sort.
+const JOIN: &str = "SELECT u.country, count(*) FROM orders o JOIN users u ON u.id = o.user_id \
+                    WHERE o.status = 'paid' GROUP BY u.country ORDER BY 2 DESC";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn metadata() {
@@ -205,4 +210,33 @@ async fn streaming() {
         exercise_streaming(&conn, "SELECT * FROM analytics.events WHERE id <= 250000", 250_000),
     )
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explain_plans() {
+    let Some(conn) = connect_or_skip(&pg_config(), &password()).await else {
+        return;
+    };
+    exercise_explain(&conn, JOIN, "UPDATE orders SET total = 0", "SELECT count(*), sum(total) FROM orders").await;
+    exercise_read_only_explain(
+        &conn,
+        "SELECT pg_sleep(0.5)",
+        "UPDATE orders SET note = note WHERE id = 1",
+        "SET default_transaction_read_only = on",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explain_analyze_blocks_writes_through_functions() {
+    let Some(conn) = connect_or_skip(&pg_config(), &password()).await else {
+        return;
+    };
+    let last_value = "SELECT last_value, is_called FROM categories_id_seq";
+    let before = rows(&conn, last_value).await.rows;
+    let req = plan::request(&conn.server_info(), "SELECT nextval('categories_id_seq')", ExplainMode::Analyze).unwrap();
+    let err = conn.explain(&req).await.unwrap_err().to_string();
+    assert!(err.contains("read-only transaction"), "{err}");
+    assert_eq!(rows(&conn, last_value).await.rows, before, "the sequence did not move");
+    conn.query("UPDATE orders SET note = note WHERE id = 1", None).await.unwrap();
 }

@@ -1,10 +1,5 @@
 //! Query plans: one tree model for every engine's EXPLAIN output, the statements that ask a
-//! server for a plan ([`request`]), and the parsers that read its output ([`parse`]).
-//!
-//! The model keeps what the engines report in common. A node has an operation, the object it
-//! reads, a condition, the planner's estimate and the measured actuals, plus every raw attribute
-//! for display. MySQL TREE text, MySQL and MariaDB JSON, PostgreSQL JSON, SQLite's
-//! `EXPLAIN QUERY PLAN` rows and SQLite's measured scan status all fit it.
+//! server for a plan ([`request()`]), and the parsers that read its output ([`parse`]).
 
 mod access;
 mod facts;
@@ -31,7 +26,6 @@ pub struct NodeId(usize);
 impl NodeId {
     pub const ROOT: NodeId = NodeId(0);
 
-    /// Position in [`Plan::nodes`], for per-node state kept in a `Vec`.
     pub fn index(self) -> usize {
         self.0
     }
@@ -47,9 +41,7 @@ pub enum PlanFormat {
     /// MySQL `EXPLAIN [ANALYZE] FORMAT=JSON` with `explain_json_format_version = 2`, the 9.x
     /// default.
     MySqlJsonV2,
-    /// MariaDB `EXPLAIN FORMAT=JSON` and `ANALYZE FORMAT=JSON`.
     MariaDbJson,
-    /// PostgreSQL `EXPLAIN (FORMAT JSON)`, with or without ANALYZE.
     PostgresJson,
     /// SQLite `EXPLAIN QUERY PLAN` rows.
     SqliteQueryPlan,
@@ -93,7 +85,6 @@ pub struct Cost {
     pub total: f64,
 }
 
-/// What the planner expected.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Estimate {
     /// Rows per loop.
@@ -106,17 +97,14 @@ pub struct Estimate {
 pub struct ActualTime {
     /// Milliseconds to the first row; `None` when the engine reports only a duration (MariaDB).
     pub first_row_ms: Option<f64>,
-    /// Milliseconds to the last row.
     pub last_row_ms: f64,
 }
 
-/// What happened when the statement ran.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Actual {
     /// Rows per loop, averaged over the loops, so it can be fractional. `None` for a step the
     /// engine times without counting its rows, such as a MariaDB query block.
     pub rows: Option<f64>,
-    /// How many times the node ran; zero when it never executed.
     pub loops: u64,
     /// `None` when the engine counted rows without timing them.
     pub time: Option<ActualTime>,
@@ -132,7 +120,6 @@ pub struct PlanNode {
     pub role: Option<String>,
     /// The table, CTE or temporary result it reads.
     pub object: Option<String>,
-    /// The index it uses.
     pub index: Option<String>,
     /// How the engine reaches the rows, in its own words: `ALL`, `ref` or `eq_ref` in MySQL's
     /// JSON version 1, `table`, `index` or `join` in version 2.
@@ -151,9 +138,8 @@ pub struct PlanNode {
 /// Actual rows this many times above or below the estimate count as a misestimate.
 pub const MISESTIMATE_FACTOR: f64 = 10.0;
 
-/// Engines print three significant digits, so steps below that add up to a little more than
-/// the step above them are rounding. A [`Plan::spans`] value this much over the step's own is
-/// worth showing.
+/// Engines print three significant digits, so a [`Plan::spans`] value only this much over the
+/// step's own is rounding.
 pub const SPAN_SLACK: f64 = 1.05;
 
 impl PlanNode {
@@ -223,12 +209,10 @@ impl Plan {
         self.nodes[id.0].parent
     }
 
-    /// Zero for the root.
     pub fn depth(&self, id: NodeId) -> usize {
         self.nodes[id.0].depth
     }
 
-    /// Nodes below `id`, at any depth.
     pub fn descendant_count(&self, id: NodeId) -> usize {
         self.children(id).iter().map(|c| 1 + self.descendant_count(*c)).sum()
     }
@@ -246,8 +230,7 @@ impl Plan {
             && matches!(self.format, PlanFormat::MySqlTree | PlanFormat::MySqlJson | PlanFormat::MySqlJsonV2)
     }
 
-    /// Rows per loop the planner expected; `None` when it estimated none, MySQL's `rows=0`
-    /// placeholder included.
+    /// Rows per loop the planner expected, without MySQL's `rows=0` placeholder.
     pub fn estimated_rows(&self, id: NodeId) -> Option<f64> {
         let estimate = self.node(id).estimate?;
         (!self.unestimated(&estimate)).then_some(estimate.rows)
@@ -268,7 +251,6 @@ impl Plan {
         Some(actual.max(1.0) / estimated.max(1.0))
     }
 
-    /// The actual rows are at least [`MISESTIMATE_FACTOR`] times above or below the estimate.
     pub fn is_misestimated(&self, id: NodeId) -> bool {
         self.row_estimate_ratio(id).is_some_and(|r| r >= MISESTIMATE_FACTOR || r <= 1.0 / MISESTIMATE_FACTOR)
     }
@@ -287,20 +269,18 @@ impl Plan {
         Some((self.inclusive_ms(id)? - self.children_ms(id)).max(0.0))
     }
 
-    /// The statement's measured time: the longest any step reports, counting a step the server
-    /// didn't time as the steps below it. Usually the root's, but MySQL 8.0.18 reports 70 µs
-    /// for the limit above a union whose materialization takes milliseconds. `None` when no
-    /// step was timed.
+    /// The longest time any step reports, counting an untimed step as the steps below it. Usually
+    /// the root's, but MySQL 8.0.18 reports 70 µs for a limit above a union that takes
+    /// milliseconds to materialize.
     pub fn total_ms(&self) -> Option<f64> {
         let longest = self.nodes().map(|(id, _)| self.inclusive_ms(id).unwrap_or_else(|| self.children_ms(id)));
         let timed = self.nodes.iter().any(|n| n.actual.and_then(|a| a.time).is_some());
         timed.then(|| longest.fold(0.0, f64::max))
     }
 
-    /// Each step's `value`, or what the steps below it report in all when that is more, by
-    /// node index. A step without a value spans the steps below it. Nested numbers don't always
-    /// add up: MySQL leaves a temporary table's cost out of the steps that read it, and times
-    /// steps separately, averaged over loops.
+    /// Each step's `value`, or the sum of the steps below it when that is more, by node index.
+    /// MySQL leaves a temporary table's cost out of the steps that read it, so nested numbers
+    /// don't always add up.
     pub fn spans(&self, value: impl Fn(NodeId) -> Option<f64>) -> Vec<f64> {
         let mut spans = vec![0.0; self.nodes.len()];
         // Children come after their parent, so walking backwards sees them first.

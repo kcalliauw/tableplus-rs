@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use futures_util::{FutureExt, StreamExt, pin_mut};
 use postgres_native_tls::MakeTlsConnector;
 use tokio::sync::Mutex;
+use tokio_postgres::error::SqlState;
 use tokio_postgres::types::Type;
 use tokio_postgres::{CancelToken, Client, SimpleQueryMessage};
 
@@ -234,10 +235,13 @@ async fn stream(
 
 /// The first statement of a transaction starts it, so a later one has a later timestamp. The
 /// simple protocol sends the query as one message; the extended one stamps parse and execute
-/// apart.
+/// apart. An aborted transaction refuses the query but is still open.
 async fn in_transaction(client: &Client) -> Result<bool> {
-    let messages =
-        client.simple_query("SELECT transaction_timestamp() <> statement_timestamp()").await.map_err(pg_error)?;
+    let messages = match client.simple_query("SELECT transaction_timestamp() <> statement_timestamp()").await {
+        Ok(messages) => messages,
+        Err(e) if e.code() == Some(&SqlState::IN_FAILED_SQL_TRANSACTION) => return Ok(true),
+        Err(e) => return Err(pg_error(e)),
+    };
     let open = messages.iter().find_map(|m| match m {
         SimpleQueryMessage::Row(row) => row.get(0),
         _ => None,
@@ -543,6 +547,7 @@ impl Connection for PgConnection {
             &mut *self.client.lock().await,
             req,
             |client, sql| query_on(client, sql, None).boxed(),
+            |client, sql| async move { client.prepare(sql).await.map(|_| ()).map_err(pg_error) }.boxed(),
             |client| in_transaction(client).boxed(),
         )
         .await

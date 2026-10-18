@@ -175,6 +175,13 @@ fn s(v: &Option<String>) -> String {
     v.clone().unwrap_or_default()
 }
 
+/// Prepares `sql` and drops it. The prepared-statement protocol takes a single statement, and
+/// MySQL 5.6 to 9.7 and MariaDB 10.6 to 11.8 prepare every EXPLAIN form the plan requests use.
+async fn prepare(conn: &mut Conn, sql: &str) -> Result<()> {
+    let stmt = conn.prep(sql).await.map_err(my_error)?;
+    conn.close(stmt).await.map_err(my_error)
+}
+
 /// The server flags an open transaction in every OK packet; `DO 0` fetches a fresh one.
 async fn in_transaction(conn: &mut Conn) -> Result<bool> {
     conn.query_drop("DO 0").await.map_err(my_error)?;
@@ -619,6 +626,7 @@ impl Connection for MyConnection {
             &mut *self.conn.lock().await,
             req,
             |conn, sql| query_on(conn, sql, None).boxed(),
+            |conn, sql| prepare(conn, sql).boxed(),
             |conn| in_transaction(conn).boxed(),
         )
         .await

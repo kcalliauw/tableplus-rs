@@ -207,6 +207,7 @@ async fn mysql_explain_plans() {
         return;
     };
     exercise_explain(&conn, JOIN, "UPDATE orders SET total = 0", "SELECT COUNT(*), SUM(total) FROM orders").await;
+    exercise_explain_one_statement(&conn, "SET @tableplus_second = 1", "SELECT @tableplus_second").await;
     conn.query("SET explain_json_format_version = 1", None).await.unwrap();
     explain(&conn, JOIN, ExplainMode::Analyze).await;
     let version = driver::scalar(conn.as_ref(), "SELECT @@SESSION.explain_json_format_version").await.unwrap();
@@ -221,14 +222,28 @@ async fn mysql_explain_plans() {
 }
 
 /// With autocommit off, Explain Analyze opens no transaction that outlives it, and refuses once a
-/// statement has opened one.
-async fn exercise_explain_transactions(conn: &DynConnection, touch: &str) {
+/// statement has opened one. Neither `completion_type` nor `LOCK TABLES` changes what the session
+/// is left with. `touch` writes to `table`, and `other` is a second table.
+async fn exercise_explain_transactions(conn: &DynConnection, touch: &str, table: &str, other: &str) {
     exercise_explain_in_transaction(conn, "START TRANSACTION", touch).await;
     conn.query("SET autocommit = 0", None).await.unwrap();
     explain(conn, "SELECT 1", ExplainMode::Analyze).await;
     conn.query(touch, None).await.unwrap_or_else(|e| panic!("no read-only transaction is left open: {e:#}"));
     exercise_explain_in_transaction(conn, "SELECT 1", touch).await;
     conn.query("SET autocommit = 1", None).await.unwrap();
+
+    for completion in ["1", "2"] {
+        conn.query(&format!("SET completion_type = {completion}"), None).await.unwrap();
+        explain(conn, "SELECT 1", ExplainMode::Analyze).await;
+        conn.query(touch, None).await.unwrap_or_else(|e| panic!("completion_type {completion}: {e:#}"));
+        conn.query("SET completion_type = 0", None).await.unwrap();
+    }
+
+    conn.query(&format!("LOCK TABLES {table} READ"), None).await.unwrap();
+    explain(conn, &format!("SELECT COUNT(*) FROM {table}"), ExplainMode::Analyze).await;
+    let err = conn.query(&format!("SELECT 1 FROM {other} LIMIT 1"), None).await.unwrap_err().to_string();
+    assert!(err.contains("was not locked"), "the session still holds its table locks: {err}");
+    conn.query("UNLOCK TABLES", None).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -236,7 +251,7 @@ async fn mysql_explain_transactions() {
     let Some(conn) = connect_or_skip(&mysql_config(), &password()).await else {
         return;
     };
-    exercise_explain_transactions(&conn, "UPDATE orders SET note = note WHERE id = 1").await;
+    exercise_explain_transactions(&conn, "UPDATE orders SET note = note WHERE id = 1", "orders", "users").await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -244,7 +259,7 @@ async fn mariadb_explain_transactions() {
     let Some(conn) = connect_or_skip(&mariadb_config(), &password()).await else {
         return;
     };
-    exercise_explain_transactions(&conn, "UPDATE invoices SET paid = paid WHERE id = 1").await;
+    exercise_explain_transactions(&conn, "UPDATE invoices SET paid = paid WHERE id = 1", "invoices", "customers").await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -260,6 +275,7 @@ async fn mariadb_explain_plans() {
         "SELECT COUNT(*), SUM(amount) FROM invoices",
     )
     .await;
+    exercise_explain_one_statement(&conn, "SET @tableplus_second = 1", "SELECT @tableplus_second").await;
     exercise_read_only_explain(
         &conn,
         "SELECT SLEEP(0.5)",

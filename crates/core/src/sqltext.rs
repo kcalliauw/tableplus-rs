@@ -231,12 +231,18 @@ pub fn is_keyword(word: &str) -> bool {
     KEYWORDS.binary_search(&upper.as_str()).is_ok()
 }
 
+/// PostgreSQL, MySQL and SQLite read every non-ASCII character, a no-break space included, as part
+/// of an identifier, and only ASCII as whitespace.
 fn is_ident_start(c: char) -> bool {
-    c.is_alphabetic() || c == '_'
+    c.is_ascii_alphabetic() || c == '_' || !c.is_ascii()
 }
 
 fn is_ident_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_' || c == '$'
+    c.is_ascii_alphanumeric() || c == '_' || c == '$' || !c.is_ascii()
+}
+
+fn is_space(c: char) -> bool {
+    c.is_ascii_whitespace() || c == '\x0b'
 }
 
 /// Tokenizes `src`. Never fails: unterminated strings/comments run to the end of input.
@@ -249,8 +255,8 @@ pub fn tokenize(src: &str, dialect: Dialect) -> Vec<Token> {
     while i < len {
         let start = i;
         let c = next_char(i).unwrap();
-        let kind = if c.is_whitespace() {
-            while let Some(c) = next_char(i).filter(|c| c.is_whitespace()) {
+        let kind = if is_space(c) {
+            while let Some(c) = next_char(i).filter(|c| is_space(*c)) {
                 i += c.len_utf8();
             }
             TokenKind::Whitespace
@@ -325,7 +331,7 @@ fn line_comment(src: &str, i: usize, dialect: Dialect) -> bool {
         Dialect::MySql => {
             src[i..].starts_with('#')
                 || (src[i..].starts_with("--")
-                    && src[i + 2..].chars().next().is_none_or(|c| c.is_whitespace() || c.is_control()))
+                    && src[i + 2..].chars().next().is_none_or(|c| c.is_ascii_whitespace() || c.is_ascii_control()))
         }
         _ => src[i..].starts_with("--"),
     }
@@ -580,6 +586,10 @@ mod tests {
         let nested = "/* /* */ select 1 */ delete from t; select 2";
         assert_eq!(texts(nested, Dialect::Postgres), vec!["delete from t", "select 2"]);
         assert_eq!(texts("/* /* */ select 1", Dialect::MySql), vec!["select 1"]);
+        let nbsp = "select 1 --\u{a0} from t; delete from t";
+        assert_eq!(texts(nbsp, Dialect::MySql), vec!["select 1 --\u{a0} from t", "delete from t"]);
+        let dollar = "select 1 as a€$x$; delete from t; select '$x$'";
+        assert_eq!(texts(dollar, Dialect::Postgres), vec!["select 1 as a€$x$", "delete from t", "select '$x$'"]);
     }
 
     #[test]

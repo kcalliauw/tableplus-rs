@@ -218,6 +218,7 @@ async fn explain_plans() {
         return;
     };
     exercise_explain(&conn, JOIN, "UPDATE orders SET total = 0", "SELECT count(*), sum(total) FROM orders").await;
+    exercise_explain_one_statement(&conn, "SET application_name = 'tableplus_second'", "SHOW application_name").await;
     exercise_read_only_explain(
         &conn,
         "SELECT pg_sleep(0.5)",
@@ -233,6 +234,12 @@ async fn explain_analyze_refuses_an_open_transaction() {
         return;
     };
     exercise_explain_in_transaction(&conn, "BEGIN", "UPDATE orders SET note = note WHERE id = 1").await;
+    conn.query("BEGIN", None).await.unwrap();
+    assert!(conn.query("SELECT 1 / 0", None).await.is_err());
+    let req = plan::request(&conn.server_info(), "SELECT 1", ExplainMode::Analyze).unwrap();
+    let err = conn.explain(&req).await.unwrap_err().to_string();
+    assert!(err.contains("transaction open"), "an aborted transaction is still open: {err}");
+    conn.query("ROLLBACK", None).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

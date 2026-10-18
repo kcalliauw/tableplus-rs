@@ -12,7 +12,7 @@ use tableplus_core::alter::{ColumnDef, StructureChange, alter_statements, create
 use tableplus_core::config::{ConnectionConfig, Credentials, DriverKind};
 use tableplus_core::driver::{self, DynConnection};
 use tableplus_core::export::{CsvImportOptions, ExportFormat, ExportOptions, csv_to_inserts, export_to_vec};
-use tableplus_core::plan::{self, ExplainMode, Plan};
+use tableplus_core::plan::{self, Explain, ExplainMode, Plan};
 use tableplus_core::sqlgen::{self, CellEdit, Filter, FilterOp, RowIdentity, SortKey};
 use tableplus_core::{Dialect, StatementResult, Value};
 
@@ -464,6 +464,16 @@ pub async fn exercise_explain(conn: &DynConnection, query: &str, write: &str, ch
         plan::request(&conn.server_info(), "SELECT * FROM tableplus_missing", ExplainMode::Estimate).unwrap().explain;
     let err = format!("{:#}", conn.explain(&req).await.unwrap_err());
     assert!(err.contains("tableplus_missing") && err.contains("tableplus_no_such_table"), "{err}");
+}
+
+/// The server refuses a plan request whose text holds a second statement, even one the statement
+/// check never saw. `second` changes session state that `probe` reads.
+pub async fn exercise_explain_one_statement(conn: &DynConnection, second: &str, probe: &str) {
+    let before = rows(conn, probe).await.rows;
+    let mut req = plan::request(&conn.server_info(), "SELECT 1", ExplainMode::Estimate).unwrap();
+    req.explain = Explain::Statement(format!("{}; {second}", req.explain.sql()));
+    assert!(conn.explain(&req).await.is_err(), "the server refuses a second statement");
+    assert_eq!(rows(conn, probe).await.rows, before, "the second statement never ran");
 }
 
 /// Explain Analyze runs in a read-only session and leaves the session as it found it, before any

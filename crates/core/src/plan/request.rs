@@ -25,10 +25,9 @@ pub struct ExplainStatements {
     pub reset: Vec<String>,
     /// The format the server answers in.
     pub format: PlanFormat,
-    /// `setup` opens a read-only transaction that `reset` rolls back. Inside a transaction the
-    /// session already has open, that would run in the user's transaction or commit it, so the
-    /// driver refuses such a session.
-    pub own_transaction: bool,
+    /// `setup` makes the plan's statement read-only, which can't reach a transaction the session
+    /// already has open, so the driver refuses such a session.
+    pub needs_idle_session: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,13 +95,28 @@ const fn json_v2(mode: ExplainMode, prefix: &'static str) -> Rule {
     }
 }
 
-/// The read-only transaction an Explain Analyze runs in, rolled back afterwards. The statement
-/// check below only sees the statement's shape, and a query can still write through a function
-/// such as `nextval`.
+/// What makes an Explain Analyze read-only and undoes it. The statement check below only sees the
+/// statement's shape, and a query can still write through a function such as `nextval`.
+///
+/// PostgreSQL runs it in a transaction of its own that is rolled back. On MySQL and MariaDB,
+/// starting a transaction would release the session's `LOCK TABLES` locks, so the session's
+/// read-only setting covers the statement instead and is put back afterwards. With autocommit
+/// off the statement opens a transaction, and the rollback ends it whatever `completion_type`
+/// says.
 const fn read_only(flavor: Flavor) -> (&'static [&'static str], &'static [&'static str]) {
     match flavor {
         Flavor::Postgres => (&["BEGIN READ ONLY"], &["ROLLBACK"]),
-        Flavor::MySql | Flavor::MariaDb => (&["START TRANSACTION READ ONLY"], &["ROLLBACK"]),
+        Flavor::MySql => (
+            &[
+                "SET @tableplus_explain_read_only = @@SESSION.transaction_read_only, @@SESSION.transaction_read_only = 1",
+            ],
+            &["ROLLBACK AND NO CHAIN NO RELEASE", "SET @@SESSION.transaction_read_only = @tableplus_explain_read_only"],
+        ),
+        // MariaDB before 11.1 only knows the older name.
+        Flavor::MariaDb => (
+            &["SET @tableplus_explain_read_only = @@SESSION.tx_read_only, @@SESSION.tx_read_only = 1"],
+            &["ROLLBACK AND NO CHAIN NO RELEASE", "SET @@SESSION.tx_read_only = @tableplus_explain_read_only"],
+        ),
         Flavor::Sqlite => (&[], &[]),
     }
 }
@@ -180,7 +194,7 @@ pub fn request(server: &ServerInfo, sql: &str, mode: ExplainMode) -> Result<Expl
                 explain: Explain::Statement(format!("{prefix}{sql}")),
                 reset: ro_reset.iter().chain(reset).map(|s| s.to_string()).collect(),
                 format,
-                own_transaction: !ro_setup.is_empty(),
+                needs_idle_session: !ro_setup.is_empty(),
             })
         }
         Recipe::Measure(_) if !server.scan_status => Err(Unsupported(
@@ -192,7 +206,7 @@ pub fn request(server: &ServerInfo, sql: &str, mode: ExplainMode) -> Result<Expl
             explain: Explain::Measure(sql.to_string()),
             reset: Vec::new(),
             format,
-            own_transaction: false,
+            needs_idle_session: false,
         }),
         Recipe::Unsupported(reason) => Err(Unsupported(reason.into())),
     }
@@ -203,8 +217,9 @@ pub fn request(server: &ServerInfo, sql: &str, mode: ExplainMode) -> Result<Expl
 struct StatementShape {
     /// The first keyword in capitals, or empty when the statement starts with something else.
     verb: String,
-    /// The first word in capitals, keyword or not.
+    /// The first word in capitals, keyword or not, and the one after it.
     word: String,
+    next_word: String,
     cte_verbs: Vec<String>,
     select_into: bool,
     /// A MySQL or MariaDB `/*! … */` comment, whose text the server runs as part of the statement.
@@ -293,11 +308,17 @@ impl StatementShape {
                 (TokenKind::Keyword, w) => depth == 0 && w.eq_ignore_ascii_case("INTO"),
                 _ => false,
             });
-        Self { verb, word: word(i), cte_verbs, select_into, executable_comment }
+        Self { verb, word: word(i), next_word: word(i + 1), cte_verbs, select_into, executable_comment }
     }
 
     fn asks_for_plan(&self, flavor: Flavor) -> bool {
-        matches!(self.verb.as_str(), "EXPLAIN" | "DESCRIBE") || (self.verb == "ANALYZE" && flavor == MariaDb)
+        match self.verb.as_str() {
+            "EXPLAIN" | "DESCRIBE" => true,
+            "ANALYZE" => flavor == MariaDb,
+            // MariaDB's `SHOW EXPLAIN FOR <connection>` and `SHOW ANALYZE FOR …`.
+            "SHOW" => flavor == MariaDb && matches!(self.next_word.as_str(), "EXPLAIN" | "ANALYZE"),
+            _ => false,
+        }
     }
 
     /// The keyword that makes running the statement change data, if it would.
@@ -356,8 +377,8 @@ mod tests {
             let r = request(&server, q, mode).unwrap_or_else(|e| panic!("{server} {mode:?}: {e}"));
             assert_eq!(r.explain, Explain::Statement(expected.into()), "{server} {mode:?}");
             assert_eq!(r.format, format, "{server} {mode:?}");
-            let restores = !r.setup.is_empty() && r.setup.len() == r.reset.len();
-            assert_eq!(restores, mode == Analyze, "{server} {mode:?}: {r:?}");
+            assert_eq!(r.needs_idle_session, mode == Analyze, "{server} {mode:?}: {r:?}");
+            assert_eq!(!r.setup.is_empty() && !r.reset.is_empty(), mode == Analyze, "{server} {mode:?}: {r:?}");
         }
     }
 
@@ -370,8 +391,9 @@ mod tests {
             for server in [MYSQL_84, ServerInfo::new(MySql, Version::new(9, 7, 2))] {
                 let r = request(&server, "select * from orders", mode).unwrap();
                 assert_eq!((r.explain.sql(), r.format), (expected, PlanFormat::MySqlJsonV2), "{server} {mode:?}");
-                assert_eq!(r.setup.len(), if mode == Analyze { 2 } else { 1 }, "{server} {mode:?}");
-                assert_eq!(r.reset.len(), r.setup.len());
+                assert!(r.setup[0].contains("explain_json_format_version = 2"), "{server} {mode:?}: {r:?}");
+                let restore = r.reset.last().unwrap();
+                assert!(restore.contains("= @tableplus_explain_json_format"), "{server} {mode:?}: {r:?}");
             }
         }
     }
@@ -487,6 +509,8 @@ mod tests {
             (MYSQL_84, "desc orders"),
             (POSTGRES, "explain (analyze) select 1"),
             (MARIADB, "ANALYZE FORMAT=JSON SELECT 1"),
+            (MARIADB, "SHOW EXPLAIN FORMAT=JSON FOR 12"),
+            (MARIADB, "show analyze for 12"),
             (SQLITE, "EXPLAIN QUERY PLAN SELECT 1"),
         ] {
             assert!(explain(server, sql, Estimate).unwrap_err().contains("already"), "{sql}");

@@ -94,4 +94,5 @@ async fn sqlite_explain_plans() {
     let cfg = sqlite_fixture(dir.path()).await;
     let conn = driver::connect(&cfg, &Credentials::default()).await.unwrap();
     exercise_explain(&conn, JOIN, "UPDATE orders SET total = 0", "SELECT count(*), total(total) FROM orders").await;
+    exercise_explain_one_statement(&conn, "PRAGMA user_version = 7", "PRAGMA user_version").await;
 }

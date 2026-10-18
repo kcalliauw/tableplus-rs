@@ -87,6 +87,9 @@ pub struct Explained {
 /// Runs one statement on a session the caller holds.
 type Query<S> = for<'a> fn(&'a mut S, &'a str) -> BoxFuture<'a, Result<StatementResult>>;
 
+/// Prepares one statement on a session the caller holds without running it.
+type Prepare<S> = for<'a> fn(&'a mut S, &'a str) -> BoxFuture<'a, Result<()>>;
+
 /// Whether a session the caller holds has a transaction open.
 type InTransaction<S> = for<'a> fn(&'a mut S) -> BoxFuture<'a, Result<bool>>;
 
@@ -95,21 +98,24 @@ async fn explain_with<S: Send>(
     session: &mut S,
     req: &ExplainStatements,
     query: Query<S>,
+    prepare: Prepare<S>,
     in_transaction: InTransaction<S>,
 ) -> Result<Explained> {
     let Explain::Statement(sql) = &req.explain else {
         bail!("this database measures plans through EXPLAIN statements");
     };
-    if req.own_transaction && in_transaction(session).await? {
+    if req.needs_idle_session && in_transaction(session).await? {
         bail!(
-            "Explain Analyze runs the statement in a read-only transaction of its own, and this session has a \
-             transaction open. Commit or roll back first."
+            "Explain Analyze runs the statement read-only, and this session has a transaction open whose writes \
+             it can't stop. Commit or roll back first."
         );
     }
     let plan = async {
         for setup in &req.setup {
             query(session, setup).await?;
         }
+        // A plain query runs every statement in its text; preparing refuses a second one.
+        prepare(session, sql).await?;
         let started = Instant::now();
         let result = query(session, sql).await?;
         Ok(QueryOutput { sql: sql.clone(), result, elapsed: started.elapsed() })

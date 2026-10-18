@@ -21,7 +21,7 @@ use crate::widgets::{fmt_count, fmt_ms, fmt_rows};
 use layout::{BOX_W, Layout};
 use paint::{
     Edge, Frame, Look, TextScale, cap, dots, fit_icon, fold_pill, fold_pill_rect, fold_stack, legend, legend_class,
-    paint_box, paint_join, surfaces, tooltip,
+    paint_box, paint_join, tooltip,
 };
 
 const MIN_ZOOM: f32 = 0.02;
@@ -573,9 +573,8 @@ pub fn show(
     }
 
     let mut painter = ui.painter_at(canvas);
-    let s = surfaces(p, dark);
-    painter.rect_filled(canvas, CornerRadius::ZERO, s.canvas);
-    dots(&painter, canvas, view.camera, s.dots);
+    painter.rect_filled(canvas, CornerRadius::ZERO, p.plan_canvas);
+    dots(&painter, canvas, view.camera, p.plan_dots);
     painter.set_opacity(opacity);
 
     let mut lit = vec![false; plan.node_count()];
@@ -589,7 +588,6 @@ pub fn show(
         canvas,
         camera: view.camera,
         p,
-        s,
         dark,
         analyzed: prepared.analyzed,
         text: (view.camera.zoom >= TEXT_ZOOM).then(|| TextScale::new(view.camera.zoom, moving)),
@@ -652,7 +650,6 @@ pub fn show(
 /// Zoom out, the zoom level (click for 100%), zoom in and fit to view, bottom right.
 fn controls(ui: &mut Ui, id: Id, canvas: Rect, view: &mut GraphView, now: f64) {
     let p = palette(ui);
-    let s = surfaces(p, ui.visuals().dark_mode);
     let zoom = view.target().zoom;
     let label = format!("{:.0}%", zoom * 100.0);
     let (bw, lw, h) = (28.0, 50.0, 26.0);
@@ -662,8 +659,8 @@ fn controls(ui: &mut Ui, id: Id, canvas: Rect, view: &mut GraphView, now: f64) {
     painter.rect(
         rect,
         CornerRadius::same(7),
-        s.card.gamma_multiply(0.94),
-        Stroke::new(1.0, s.card_border),
+        p.plan_card.gamma_multiply(0.94),
+        Stroke::new(1.0, p.plan_card_border),
         StrokeKind::Inside,
     );
     let slot = |left: f32, w: f32| Rect::from_min_size(pos2(rect.left() + left, rect.top() + 2.0), vec2(w, h - 4.0));
@@ -684,8 +681,10 @@ fn controls(ui: &mut Ui, id: Id, canvas: Rect, view: &mut GraphView, now: f64) {
     painter.text(r_reset.center(), Align2::CENTER_CENTER, &label, theme::ui_font(11.5), p.text_muted);
     icons::paint(&painter, Rect::from_center_size(r_in.center(), Vec2::splat(12.0)), Icon::Plus, p.text_muted);
     let sep = r_fit.left() - 1.5;
-    painter
-        .line_segment([pos2(sep, rect.top() + 6.0), pos2(sep, rect.bottom() - 6.0)], Stroke::new(1.0, s.card_border));
+    painter.line_segment(
+        [pos2(sep, rect.top() + 6.0), pos2(sep, rect.bottom() - 6.0)],
+        Stroke::new(1.0, p.plan_card_border),
+    );
     fit_icon(&painter, r_fit.center(), p.text_muted);
 
     let to = [(out, zoom / 1.25), (zin, zoom * 1.25), (reset, 1.0)].into_iter().find(|(r, _)| r.clicked());

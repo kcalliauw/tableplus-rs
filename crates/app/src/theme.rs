@@ -79,6 +79,12 @@ pub struct Palette {
     pub plan_heat_low: Color32,
     pub plan_heat_mid: Color32,
     pub plan_heat_high: Color32,
+    /// Plan graph: its canvas and dot grid, the step cards and their borders, and the edges.
+    pub plan_canvas: Color32,
+    pub plan_dots: Color32,
+    pub plan_card: Color32,
+    pub plan_card_border: Color32,
+    pub plan_edge: Color32,
 }
 
 const fn hex(rgb: u32) -> Color32 {
@@ -130,6 +136,11 @@ pub static LIGHT: Palette = Palette {
     plan_heat_low: hex(0x8FB9F7),
     plan_heat_mid: hex(0xF4C870),
     plan_heat_high: hex(0xF49A95),
+    plan_canvas: hex(0xF5F6F8),
+    plan_dots: hex(0xDDDFE4),
+    plan_card: hex(0xFFFFFF),
+    plan_card_border: hex(0xD8DADF),
+    plan_edge: hex(0xB9BEC8),
 };
 
 pub static DARK: Palette = Palette {
@@ -177,6 +188,11 @@ pub static DARK: Palette = Palette {
     plan_heat_low: hex(0x3866AE),
     plan_heat_mid: hex(0x8A6422),
     plan_heat_high: hex(0x9B3B37),
+    plan_canvas: hex(0x1C1C1E),
+    plan_dots: hex(0x2D2D31),
+    plan_card: hex(0x28282B),
+    plan_card_border: hex(0x3D3D42),
+    plan_edge: hex(0x585960),
 };
 
 pub fn palette(ui: &Ui) -> &'static Palette {

@@ -30,38 +30,6 @@ fn legend_label(access: Access) -> &'static str {
     }
 }
 
-/// The canvas and box surfaces, which the palette has no names for.
-pub(super) struct Surfaces {
-    pub(super) canvas: Color32,
-    pub(super) card: Color32,
-    pub(super) card_border: Color32,
-    pub(super) dots: Color32,
-    pub(super) edge: Color32,
-    pub(super) shadow: Option<Shadow>,
-}
-
-pub(super) fn surfaces(p: &Palette, dark: bool) -> Surfaces {
-    if dark {
-        Surfaces {
-            canvas: p.content_bg,
-            card: Color32::from_rgb(0x28, 0x28, 0x2B),
-            card_border: Color32::from_rgb(0x3D, 0x3D, 0x42),
-            dots: Color32::from_rgb(0x2D, 0x2D, 0x31),
-            edge: Color32::from_rgb(0x58, 0x59, 0x60),
-            shadow: None,
-        }
-    } else {
-        Surfaces {
-            canvas: Color32::from_rgb(0xF5, 0xF6, 0xF8),
-            card: Color32::WHITE,
-            card_border: Color32::from_rgb(0xD8, 0xDA, 0xDF),
-            dots: Color32::from_rgb(0xDD, 0xDF, 0xE4),
-            edge: Color32::from_rgb(0xB9, 0xBE, 0xC8),
-            shadow: Some(Shadow { offset: [0, 1], blur: 6, spread: 0, color: Color32::from_black_alpha(18) }),
-        }
-    }
-}
-
 /// Text is laid out at a font size close to the zoom and its glyphs scaled the rest of the way.
 /// At rest that size follows the zoom finely, so text is crisp; while the zoom moves it steps by
 /// powers of √2, so a zoom gesture doesn't rasterize the font at every size it passes.
@@ -127,7 +95,6 @@ pub(super) struct Frame<'a> {
     pub(super) canvas: Rect,
     pub(super) camera: Camera,
     pub(super) p: &'static Palette,
-    pub(super) s: Surfaces,
     pub(super) dark: bool,
     pub(super) analyzed: bool,
     /// `None` when zoomed out too far for text.
@@ -148,6 +115,10 @@ impl Frame<'_> {
 
     fn accent(&self) -> Color32 {
         if self.focused { self.p.accent } else { self.p.accent.gamma_multiply(0.6) }
+    }
+
+    fn shadow(&self) -> Option<Shadow> {
+        (!self.dark).then_some(Shadow { offset: [0, 1], blur: 6, spread: 0, color: Color32::from_black_alpha(18) })
     }
 }
 
@@ -186,7 +157,7 @@ pub(super) fn paint_box(f: &Frame, r: Rect, node: &PlanNode, step: &Step, look: 
     let (p, z, painter) = (f.p, f.zoom(), f.painter);
     let corner = radius(8.0 * z);
     let tint = step.access.map(|a| access_color(a, f.dark));
-    let (mut card, mut border) = (f.s.card, f.s.card_border);
+    let (mut card, mut border) = (f.p.plan_card, f.p.plan_card_border);
     if let Some(c) = tint {
         card = mix(card, c, if f.dark { 0.11 } else { 0.06 });
         border = mix(border, c, if f.dark { 0.42 } else { 0.5 });
@@ -194,7 +165,7 @@ pub(super) fn paint_box(f: &Frame, r: Rect, node: &PlanNode, step: &Step, look: 
     border = mix(border, p.text_faint, look.hovered * 0.7);
     let fade = |c: Color32| c.gamma_multiply(look.alpha);
 
-    if let Some(shadow) = f.s.shadow {
+    if let Some(shadow) = f.shadow() {
         let lift = Shadow {
             offset: [0, 1 + (look.hovered * 2.0) as i8],
             blur: shadow.blur + (look.hovered * 8.0) as u8,
@@ -246,7 +217,7 @@ pub(super) fn paint_box(f: &Frame, r: Rect, node: &PlanNode, step: &Step, look: 
             pos2(badge_right - size.x - 10.0 * z, r.top() + 8.0 * z),
             pos2(badge_right, r.top() + 23.0 * z),
         );
-        painter.rect_stroke(pill, radius(4.0 * z), Stroke::new(1.0, fade(f.s.card_border)), StrokeKind::Inside);
+        painter.rect_stroke(pill, radius(4.0 * z), Stroke::new(1.0, fade(f.p.plan_card_border)), StrokeKind::Inside);
         paint_text(painter, pill.center(), Align2::CENTER_CENTER, job, scale);
         badge_right = pill.left() - 4.0 * z;
     }
@@ -319,9 +290,9 @@ pub(super) fn paint_join(f: &Frame, r: Rect, node: &PlanNode, step: &Step, look:
     let (fill, stroke, glyph) = if look.selected {
         (accent, accent, p.accent_text)
     } else {
-        (f.s.card, mix(f.s.card_border, p.text_muted, 0.3 + look.hovered * 0.5), p.text_muted)
+        (f.p.plan_card, mix(f.p.plan_card_border, p.text_muted, 0.3 + look.hovered * 0.5), p.text_muted)
     };
-    if let Some(shadow) = f.s.shadow {
+    if let Some(shadow) = f.shadow() {
         let shadow = Shadow { color: fade(shadow.color), ..shadow };
         painter.add(shadow.as_shape(Rect::from_center_size(c, Vec2::splat(d * 1.25)), radius(4.0 * z)));
     }
@@ -387,14 +358,20 @@ pub(super) fn fold_stack(f: &Frame, card: Rect) {
     let z = f.zoom();
     for depth in [2.0, 1.0] {
         let r = card.translate(vec2(0.0, 6.0 * z * depth)).shrink2(vec2(8.0 * z * depth, 0.0));
-        f.painter.rect(r, radius(8.0 * z), f.s.card, Stroke::new(1.0, f.s.card_border), StrokeKind::Inside);
+        f.painter.rect(r, radius(8.0 * z), f.p.plan_card, Stroke::new(1.0, f.p.plan_card_border), StrokeKind::Inside);
     }
 }
 
 /// The `+12` tab under a folded step; clicking it unfolds the step.
 pub(super) fn fold_pill(f: &Frame, card: Rect, hidden: usize) {
     let rect = fold_pill_rect(card, f.zoom());
-    f.painter.rect(rect, radius(rect.height() / 2.0), f.s.card, Stroke::new(1.0, f.s.card_border), StrokeKind::Inside);
+    f.painter.rect(
+        rect,
+        radius(rect.height() / 2.0),
+        f.p.plan_card,
+        Stroke::new(1.0, f.p.plan_card_border),
+        StrokeKind::Inside,
+    );
     if let Some(scale) = f.text {
         let job = line(&format!("+{}", fmt_count(hidden as u64)), theme::bold_font(10.5), f.p.text_muted, 60.0, scale);
         paint_text(f.painter, rect.center(), Align2::CENTER_CENTER, job, scale);
@@ -460,7 +437,7 @@ impl Edge {
     pub(super) fn paint(&self, f: &Frame, lit: bool, flow: Option<f64>, alpha: f32) {
         let z = f.zoom();
         let screen = self.points.map(|p| f.camera.to_screen(f.canvas, p));
-        let color = if lit { f.p.plan_guide_active } else { f.s.edge }.gamma_multiply(alpha);
+        let color = if lit { f.p.plan_guide_active } else { f.p.plan_edge }.gamma_multiply(alpha);
         let width = (self.width * z).max(1.0);
         // The curve stops short of the parent, where the arrowhead takes over.
         let [a, b, c, d] = screen;
@@ -490,7 +467,7 @@ impl Edge {
         f.painter.rect(
             pill,
             radius(pill.height() / 2.0),
-            f.s.canvas.gamma_multiply(alpha),
+            f.p.plan_canvas.gamma_multiply(alpha),
             Stroke::new(1.0, color.gamma_multiply(0.5)),
             StrokeKind::Inside,
         );
@@ -517,7 +494,7 @@ pub(super) fn cap(f: &Frame, root: Rect, prepared: &Prepared, alpha: f32) {
     let fade = |c: Color32| c.gamma_multiply(alpha);
     let Some(scale) = f.text else {
         let pill = Rect::from_center_size(rect.center(), vec2(90.0 * z, rect.height()));
-        f.painter.rect_filled(pill, radius(pill.height() / 2.0), fade(f.s.card_border));
+        f.painter.rect_filled(pill, radius(pill.height() / 2.0), fade(f.p.plan_card_border));
         return;
     };
     let mut job = LayoutJob::default();
@@ -530,8 +507,8 @@ pub(super) fn cap(f: &Frame, root: Rect, prepared: &Prepared, alpha: f32) {
     f.painter.rect(
         pill,
         radius(pill.height() / 2.0),
-        fade(f.s.card),
-        Stroke::new(1.0, fade(f.s.card_border)),
+        fade(f.p.plan_card),
+        Stroke::new(1.0, fade(f.p.plan_card_border)),
         StrokeKind::Inside,
     );
     paint_text(f.painter, pill.center(), Align2::CENTER_CENTER, job, scale);
@@ -599,7 +576,6 @@ pub(super) fn legend(ui: &Ui, canvas: Rect, prepared: &Prepared, p: &Palette, da
     if prepared.legend.is_empty() && !prepared.has_joins {
         return;
     }
-    let s = surfaces(p, dark);
     let font = theme::ui_font(11.0);
     let items: Vec<(Option<Access>, &str)> = prepared
         .legend
@@ -617,8 +593,8 @@ pub(super) fn legend(ui: &Ui, canvas: Rect, prepared: &Prepared, p: &Palette, da
     painter.rect(
         rect,
         CornerRadius::same(7),
-        s.card.gamma_multiply(0.94),
-        Stroke::new(1.0, s.card_border),
+        p.plan_card.gamma_multiply(0.94),
+        Stroke::new(1.0, p.plan_card_border),
         StrokeKind::Inside,
     );
     let mut x = rect.left() + 10.0;
@@ -633,7 +609,7 @@ pub(super) fn legend(ui: &Ui, canvas: Rect, prepared: &Prepared, p: &Palette, da
                 let c = swatch.center();
                 let d = 4.5;
                 let pts = vec![pos2(c.x, c.y - d), pos2(c.x + d, c.y), pos2(c.x, c.y + d), pos2(c.x - d, c.y)];
-                painter.add(Shape::convex_polygon(pts, s.card, Stroke::new(1.25, p.text_muted)));
+                painter.add(Shape::convex_polygon(pts, p.plan_card, Stroke::new(1.25, p.text_muted)));
             }
         }
         painter.text(pos2(x + 13.0, cy), Align2::LEFT_CENTER, *label, font.clone(), p.text_muted);

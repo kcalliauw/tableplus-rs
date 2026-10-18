@@ -10,7 +10,8 @@ use eframe::egui::{
 use tableplus_core::plan::{Access, NodeId, PlanNode};
 
 use super::layout::ROW_GAP;
-use super::{Camera, DIAMOND_R, DIAMOND_Y, Prepared, Step, access_color, cap_rect, rows_text};
+use super::steps::{Prepared, Step, rows_text};
+use super::{Camera, DIAMOND_R, DIAMOND_Y, access_color, cap_rect};
 use crate::theme::{self, Palette, palette};
 use crate::widgets::{fmt_count, fmt_factor, fmt_rows};
 

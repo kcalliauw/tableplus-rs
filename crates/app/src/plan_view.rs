@@ -46,18 +46,20 @@ pub enum PlanContent {
 impl PlanContent {
     /// The output of an Explain action: a tree when a parser reads it, otherwise the raw text.
     pub fn explained(server: &ServerInfo, rows: &ResultSet, format: PlanFormat) -> Self {
-        Self::detected(server, rows).unwrap_or_else(|| PlanContent::Raw {
-            text: plan::raw_text(rows),
-            reason: format!("No visual plan for {} output yet. This is the server's own text.", format.label()),
-        })
+        match plan::parse(server, rows) {
+            Some(Ok(plan)) => PlanContent::Tree(Box::new(plan)),
+            Some(Err(e)) => PlanContent::Raw { text: plan::raw_text(rows), reason: format!("{e}.") },
+            None => PlanContent::Raw {
+                text: plan::raw_text(rows),
+                reason: format!("No visual plan for {} output yet. This is the server's own text.", format.label()),
+            },
+        }
     }
 
-    /// A plan for any result that is one, such as a hand-typed `EXPLAIN ANALYZE`.
+    /// A plan for a result that reads as one, such as a hand-typed `EXPLAIN ANALYZE`. Ordinary
+    /// results that only look like a plan, such as a JSON value, stay rows.
     pub fn detected(server: &ServerInfo, rows: &ResultSet) -> Option<Self> {
-        Some(match plan::parse(server, rows)? {
-            Ok(plan) => PlanContent::Tree(Box::new(plan)),
-            Err(e) => PlanContent::Raw { text: plan::raw_text(rows), reason: format!("{e}.") },
-        })
+        plan::parse(server, rows)?.ok().map(|plan| PlanContent::Tree(Box::new(plan)))
     }
 }
 
@@ -1039,5 +1041,27 @@ fn bar_tooltip(node: &PlanNode, m: &Metrics, scale: f64, analyzed: bool) -> Opti
                 share(m.cost_span)
             ),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tableplus_core::model::ColumnMeta;
+    use tableplus_core::{Flavor, Value, Version};
+
+    #[test]
+    fn json_query_results_stay_rows() {
+        let one_cell = |column: &str, text: &str| ResultSet {
+            columns: vec![ColumnMeta { name: column.into(), type_name: "json".into() }],
+            rows: vec![vec![Value::Text(text.into())].into_boxed_slice()],
+            truncated: false,
+        };
+        let postgres = ServerInfo::new(Flavor::Postgres, Version::new(17, 6, 0));
+        let mariadb = ServerInfo::new(Flavor::MariaDb, Version::new(11, 8, 0));
+        assert!(PlanContent::detected(&postgres, &one_cell("json_agg", "[1,2,3]")).is_none());
+        assert!(PlanContent::detected(&mariadb, &one_cell("doc", r#"{"customer_id":1}"#)).is_none());
+        let explained = PlanContent::explained(&postgres, &one_cell("QUERY PLAN", "[1,2,3]"), PlanFormat::PostgresJson);
+        assert!(matches!(explained, PlanContent::Raw { .. }), "an explicit Explain still shows the server's text");
     }
 }

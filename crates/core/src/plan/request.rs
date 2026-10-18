@@ -95,6 +95,19 @@ const fn json_v2(mode: ExplainMode, prefix: &'static str) -> Rule {
     }
 }
 
+/// Statements that make the session's next transactions read-only for an Explain Analyze, and
+/// undo it. The statement check below only sees the statement's shape; a query can still write
+/// through a function such as `nextval`, which a read-only transaction refuses.
+const fn read_only(flavor: Flavor) -> (&'static [&'static str], &'static [&'static str]) {
+    match flavor {
+        Flavor::Postgres => (&["SET default_transaction_read_only = on"], &["RESET default_transaction_read_only"]),
+        Flavor::MySql | Flavor::MariaDb => {
+            (&["SET SESSION TRANSACTION READ ONLY"], &["SET SESSION TRANSACTION READ WRITE"])
+        }
+        Flavor::Sqlite => (&[], &[]),
+    }
+}
+
 const ANY: Version = Version::new(0, 0, 0);
 const MYSQL_TREE: Version = Version::new(8, 0, 18);
 const MYSQL_JSON_V2: Version = Version::new(8, 4, 0);
@@ -143,12 +156,15 @@ pub fn request(server: &ServerInfo, sql: &str, mode: ExplainMode) -> Result<Expl
         .max_by_key(|r| r.since)
         .expect("every flavor and mode has a rule for any version");
     match rule.recipe {
-        Recipe::Wrap { prefix, format, setup, reset } => Ok(ExplainStatements {
-            setup: setup.iter().map(|s| s.to_string()).collect(),
-            explain: Explain::Statement(format!("{prefix}{sql}")),
-            reset: reset.iter().map(|s| s.to_string()).collect(),
-            format,
-        }),
+        Recipe::Wrap { prefix, format, setup, reset } => {
+            let (ro_setup, ro_reset) = if mode == Analyze { read_only(server.flavor) } else { (&[][..], &[][..]) };
+            Ok(ExplainStatements {
+                setup: ro_setup.iter().chain(setup).map(|s| s.to_string()).collect(),
+                explain: Explain::Statement(format!("{prefix}{sql}")),
+                reset: reset.iter().chain(ro_reset).map(|s| s.to_string()).collect(),
+                format,
+            })
+        }
         Recipe::Measure(_) if !server.scan_status => Err(Unsupported(
             "This SQLite library was built without SQLITE_ENABLE_STMT_SCANSTATUS, so it can't measure the statement."
                 .into(),
@@ -308,7 +324,14 @@ mod tests {
             let r = request(&server, q, mode).unwrap_or_else(|e| panic!("{server} {mode:?}: {e}"));
             assert_eq!(r.explain, Explain::Statement(expected.into()), "{server} {mode:?}");
             assert_eq!(r.format, format, "{server} {mode:?}");
-            assert!(r.setup.is_empty() && r.reset.is_empty());
+            assert_eq!(
+                r.setup,
+                read_only(server.flavor).0.iter().filter(|_| mode == Analyze).copied().collect::<Vec<_>>()
+            );
+            assert_eq!(
+                r.reset,
+                read_only(server.flavor).1.iter().filter(|_| mode == Analyze).copied().collect::<Vec<_>>()
+            );
         }
     }
 
@@ -321,10 +344,11 @@ mod tests {
             for server in [MYSQL_84, ServerInfo::new(MySql, Version::new(9, 7, 2))] {
                 let r = request(&server, "select * from orders", mode).unwrap();
                 assert_eq!((r.explain.sql(), r.format), (expected, PlanFormat::MySqlJsonV2), "{server} {mode:?}");
-                assert_eq!(r.setup.len(), 1);
-                assert!(r.setup[0].contains("explain_json_format_version = 2"), "{}", r.setup[0]);
-                assert!(r.setup[0].contains("@tableplus_explain_json_format = @@SESSION.explain_json_format_version"));
-                assert_eq!(r.reset, ["SET explain_json_format_version = @tableplus_explain_json_format"]);
+                let json = r.setup.last().unwrap();
+                assert!(json.contains("explain_json_format_version = 2"), "{json}");
+                assert!(json.contains("@tableplus_explain_json_format = @@SESSION.explain_json_format_version"));
+                assert_eq!(r.reset[0], "SET explain_json_format_version = @tableplus_explain_json_format");
+                assert_eq!(r.setup.len(), if mode == Analyze { 2 } else { 1 }, "{server} {mode:?}");
             }
         }
     }
@@ -365,6 +389,20 @@ mod tests {
     }
 
     #[test]
+    fn analyze_runs_in_a_read_only_session() {
+        for server in [POSTGRES, MYSQL_8018, MYSQL_84, MARIADB] {
+            let r = request(&server, "select nextval('s')", Analyze).unwrap();
+            assert!(
+                r.setup[0].contains("READ ONLY") || r.setup[0].contains("read_only = on"),
+                "{server}: {:?}",
+                r.setup
+            );
+            assert!(r.reset.last().unwrap().contains("READ WRITE") || r.reset.last().unwrap().starts_with("RESET"));
+            assert!(request(&server, "select 1", Estimate).unwrap().setup.iter().all(|s| !s.contains("READ ONLY")));
+        }
+    }
+
+    #[test]
     fn analyze_never_runs_writes() {
         for (server, sql, verb) in [
             (MYSQL_84, "update products set unit_price = unit_price * 1.05", "UPDATE"),
@@ -379,6 +417,8 @@ mod tests {
                 "INSERT",
             ),
             (POSTGRES, "select * into new_table from t", "SELECT … INTO"),
+            (MYSQL_84, "select * from orders into outfile '/tmp/orders.csv'", "SELECT … INTO"),
+            (MYSQL_84, "select count(*) into @n from orders", "SELECT … INTO"),
             (POSTGRES, "create table t as select 1", "CREATE"),
             (MARIADB, "call refresh_stats()", "CALL"),
             (MYSQL_84, "s.country, count(distinct od.order_id)", "statement"),

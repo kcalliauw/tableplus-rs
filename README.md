@@ -61,7 +61,8 @@ runs on Linux, which is where the screenshots below were taken (Xvfb, software r
 | ![Two million rows](docs/screenshots/large-table.png) Filtering and sorting a 2,000,000-row table | ![Autocomplete](docs/screenshots/sql-autocomplete.png) Alias-aware column completion |
 | ![Results](docs/screenshots/sql-results.png) Run all: one result tab per statement | ![Quick open](docs/screenshots/quick-open.png) `⌘K` quick open |
 | ![Structure](docs/screenshots/structure-preview.png) Structure edits become reviewed `ALTER` statements | ![Connection dialog](docs/screenshots/connection-dialog.png) SSH tunnel + successful Test (light theme) |
-| ![MySQL, light](docs/screenshots/light-mysql.png) MySQL session next to a PostgreSQL one | |
+| ![MySQL, light](docs/screenshots/light-mysql.png) MySQL session next to a PostgreSQL one | ![Explain Analyze](docs/screenshots/explain-tree.png) `⌘⇧E` Explain Analyze on MySQL: estimated and actual rows per step, with a badge on a 72,306× miss |
+| ![Plan graph](docs/screenshots/explain-graph.png) The same plan as a graph, with a branch folded by double-clicking its step | ![Flame chart](docs/screenshots/explain-flame.png) Flame chart: width is time, and the details say how far the estimate missed |
 
 All screenshots are produced by [`scripts/screenshots.sh`](scripts/screenshots.sh), which drives the
 release build against the dockerized databases with `xdotool`.

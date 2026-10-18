@@ -13,6 +13,10 @@ use tableplus_core::model::{ConstraintKind, ObjectKind};
 use tableplus_core::sqlgen::{self, Filter, FilterOp, SortKey};
 use tableplus_core::{Flavor, StatementResult, Value};
 
+/// Paid orders per country: a join, a grouping and a sort.
+const JOIN: &str = "SELECT u.country, count(*) FROM orders o JOIN users u ON u.id = o.user_id \
+                    WHERE o.status = 'paid' GROUP BY u.country ORDER BY 2 DESC";
+
 #[tokio::test(flavor = "multi_thread")]
 async fn mysql_metadata() {
     let Some(conn) = connect_or_skip(&mysql_config(), &password()).await else {
@@ -192,6 +196,43 @@ async fn mysql_streaming() {
     timed(
         "mysql streaming 250k rows",
         exercise_streaming(&conn, "SELECT * FROM analytics.events WHERE id <= 250000", 250_000),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mysql_explain_plans() {
+    let Some(conn) = connect_or_skip(&mysql_config(), &password()).await else {
+        return;
+    };
+    exercise_explain(&conn, JOIN, "UPDATE orders SET total = 0", "SELECT COUNT(*), SUM(total) FROM orders").await;
+    exercise_read_only_explain(
+        &conn,
+        "SELECT SLEEP(0.5)",
+        "UPDATE orders SET note = note WHERE id = 1",
+        "SET SESSION transaction_read_only = 1",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mariadb_explain_plans() {
+    let Some(conn) = connect_or_skip(&mariadb_config(), &password()).await else {
+        return;
+    };
+    exercise_explain(
+        &conn,
+        "SELECT c.vip, COUNT(*), SUM(i.amount) FROM invoices i JOIN customers c ON c.id = i.customer_id \
+         WHERE i.paid GROUP BY c.vip ORDER BY 3 DESC",
+        "UPDATE invoices SET amount = 0",
+        "SELECT COUNT(*), SUM(amount) FROM invoices",
+    )
+    .await;
+    exercise_read_only_explain(
+        &conn,
+        "SELECT SLEEP(0.5)",
+        "UPDATE invoices SET paid = paid WHERE id = 1",
+        "SET SESSION tx_read_only = 1",
     )
     .await;
 }

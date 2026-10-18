@@ -30,24 +30,26 @@ pub enum PlanContent {
 
 impl PlanContent {
     pub fn explained(server: &ServerInfo, rows: &ResultSet, format: PlanFormat) -> Self {
+        Self::read(server, rows, || format!("No visual plan for {} output yet.", format.label()))
+    }
+
+    /// A plan for the result of a statement that asks for one, such as a hand-typed
+    /// `EXPLAIN ANALYZE`, with the server's text when no parser reads it. Ordinary results that
+    /// only look like a plan, such as a JSON value, stay rows.
+    pub fn detected(server: &ServerInfo, sql: &str, rows: &ResultSet) -> Option<Self> {
+        plan::asks_for_plan(server, sql)
+            .then(|| Self::read(server, rows, || "No visual plan for this output yet.".into()))
+    }
+
+    fn read(server: &ServerInfo, rows: &ResultSet, unread: impl FnOnce() -> String) -> Self {
         match plan::parse(server, rows) {
             Some(Ok(plan)) => PlanContent::Tree(Box::new(plan)),
             Some(Err(e)) => PlanContent::Raw { text: plan::raw_text(rows), reason: format!("{e}.") },
             None => PlanContent::Raw {
                 text: plan::raw_text(rows),
-                reason: format!("No visual plan for {} output yet. This is the server's own text.", format.label()),
+                reason: format!("{} This is the server's own text.", unread()),
             },
         }
-    }
-
-    /// A plan for the result of a statement that asks for one, such as a hand-typed
-    /// `EXPLAIN ANALYZE`. Ordinary results that only look like a plan, such as a JSON value,
-    /// stay rows.
-    pub fn detected(server: &ServerInfo, sql: &str, rows: &ResultSet) -> Option<Self> {
-        if !plan::asks_for_plan(server, sql) {
-            return None;
-        }
-        plan::parse(server, rows)?.ok().map(|plan| PlanContent::Tree(Box::new(plan)))
     }
 }
 
@@ -461,6 +463,11 @@ mod tests {
         let tree = one_cell("EXPLAIN", "-> Table scan on t  (cost=0.35 rows=1)");
         assert!(PlanContent::detected(&mysql, "explain format=tree select * from t", &tree).is_some());
         assert!(PlanContent::detected(&mysql, "select '-> Table scan on t  (cost=0.35 rows=1)'", &tree).is_none());
+        let text_plan = one_cell("QUERY PLAN", "Seq Scan on t  (cost=0.00..35.50 rows=2550 width=4)");
+        let shown = PlanContent::detected(&postgres, "explain select * from t", &text_plan);
+        assert!(matches!(shown, Some(PlanContent::Raw { .. })), "a plan format without a parser shows its text");
+        let columns = one_cell("Field", "id");
+        assert!(PlanContent::detected(&mysql, "describe t", &columns).is_none(), "a table's columns stay rows");
         let explained = PlanContent::explained(&postgres, &one_cell("QUERY PLAN", "[1,2,3]"), PlanFormat::PostgresJson);
         assert!(matches!(explained, PlanContent::Raw { .. }), "an explicit Explain still shows the server's text");
     }

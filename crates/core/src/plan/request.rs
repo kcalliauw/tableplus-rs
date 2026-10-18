@@ -173,6 +173,9 @@ pub fn request(server: &ServerInfo, sql: &str, mode: ExplainMode) -> Result<Expl
     if shape.asks_for_plan(server.flavor) {
         return Err(Unsupported("The statement already asks for a plan. Run it to see the plan.".into()));
     }
+    if shape.describes_table(server.flavor) {
+        return Err(Unsupported("The statement lists a table's columns, so it has no plan to explain.".into()));
+    }
     if server.flavor == Sqlite && shape.word == "PRAGMA" {
         return Err(Unsupported("SQLite applies a PRAGMA while preparing it, so explaining one would run it.".into()));
     }
@@ -318,12 +321,38 @@ impl StatementShape {
 
     fn asks_for_plan(&self, flavor: Flavor) -> bool {
         match self.verb.as_str() {
-            "EXPLAIN" | "DESCRIBE" => true,
+            "EXPLAIN" | "DESCRIBE" => !self.describes_table(flavor),
             "ANALYZE" => flavor == MariaDb,
             // MariaDB's `SHOW EXPLAIN FOR <connection>` and `SHOW ANALYZE FOR …`.
             "SHOW" => flavor == MariaDb && matches!(self.next_word.as_str(), "EXPLAIN" | "ANALYZE"),
             _ => false,
         }
+    }
+
+    /// MySQL's and MariaDB's `DESCRIBE orders` or `EXPLAIN orders`, which list a table's columns
+    /// instead of explaining a statement.
+    fn describes_table(&self, flavor: Flavor) -> bool {
+        const EXPLAINS: &[&str] = &[
+            "(",
+            "ANALYZE",
+            "DELETE",
+            "EXTENDED",
+            "FOR",
+            "FORMAT",
+            "INSERT",
+            "INTO",
+            "PARTITIONS",
+            "REPLACE",
+            "SELECT",
+            "TABLE",
+            "UPDATE",
+            "VALUES",
+            "WITH",
+        ];
+        matches!(flavor, MySql | MariaDb)
+            && matches!(self.verb.as_str(), "EXPLAIN" | "DESCRIBE")
+            && !self.next_word.is_empty()
+            && !EXPLAINS.contains(&self.next_word.as_str())
     }
 
     /// The keyword that makes running the statement change data, if it would.
@@ -510,8 +539,7 @@ mod tests {
         for (server, sql) in [
             (MYSQL_84, "EXPLAIN ANALYZE SELECT 1"),
             (MYSQL_84, "explain format=json select 1"),
-            (MYSQL_84, "describe orders"),
-            (MYSQL_84, "desc orders"),
+            (MYSQL_84, "describe select 1"),
             (POSTGRES, "explain (analyze) select 1"),
             (MARIADB, "ANALYZE FORMAT=JSON SELECT 1"),
             (MARIADB, "SHOW EXPLAIN FORMAT=JSON FOR 12"),
@@ -521,5 +549,25 @@ mod tests {
             assert!(explain(server, sql, Estimate).unwrap_err().contains("already"), "{sql}");
         }
         assert!(explain(MYSQL_84, "analyze table orders", Estimate).is_ok());
+    }
+
+    #[test]
+    fn describing_a_table_is_not_a_plan() {
+        for (server, sql) in
+            [(MYSQL_84, "describe orders"), (MYSQL_84, "desc `orders` status"), (MARIADB, "explain orders")]
+        {
+            assert!(!asks_for_plan(&server, sql), "{sql}");
+            assert!(explain(server, sql, Estimate).unwrap_err().contains("columns"), "{sql}");
+        }
+        for (server, sql) in [
+            (MYSQL_84, "explain select 1"),
+            (MYSQL_84, "explain (select 1)"),
+            (MYSQL_84, "explain for connection 12"),
+            (MARIADB, "explain extended select 1"),
+            (POSTGRES, "explain verbose select 1"),
+            (SQLITE, "explain select 1"),
+        ] {
+            assert!(asks_for_plan(&server, sql), "{sql}");
+        }
     }
 }

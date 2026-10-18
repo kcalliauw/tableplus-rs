@@ -16,9 +16,14 @@ How tableplus-rs asks each engine for a plan and reads the answer into one model
 
 On MySQL 8.4 and later, a setup statement saves the session's `explain_json_format_version` in `@tableplus_explain_json_format` and sets it to 2, and a reset statement puts it back.
 
-Explain Analyze runs the statement in a read-only transaction and rolls it back: `BEGIN READ ONLY` on PostgreSQL, `START TRANSACTION READ ONLY` on MySQL and MariaDB. A function that writes, such as `nextval`, fails, and PostgreSQL's writes to temporary tables are undone. Starting that transaction inside one the session already has open would run the statement in the user's transaction on PostgreSQL and commit it on MySQL, so the driver checks first: MySQL's `SERVER_STATUS_IN_TRANS` flag after a `DO 0`, and on PostgreSQL whether `transaction_timestamp()` differs from `statement_timestamp()`. With a transaction open, Explain Analyze asks the user to commit or roll back.
+Explain Analyze runs the statement read-only, so a function that writes, such as `nextval`, fails:
 
-Some effects outlast the rollback, and Explain Analyze doesn't block them: PostgreSQL's session advisory locks, and MySQL and MariaDB user variables and named locks (`GET_LOCK`).
+- **PostgreSQL** runs it in `BEGIN READ ONLY` and rolls back, which also undoes writes to temporary tables.
+- **MySQL and MariaDB** save the session's `transaction_read_only` (MariaDB: `tx_read_only`, the only name it knows before 11.1) in `@tableplus_explain_read_only`, set it to 1, and put it back afterwards. A `START TRANSACTION` would release the session's `LOCK TABLES` locks. With autocommit off the statement opens a transaction, which `ROLLBACK AND NO CHAIN NO RELEASE` ends whatever `completion_type` says.
+
+Neither reaches a transaction the session already has open: PostgreSQL would run the statement in the user's transaction, and MySQL's setting only applies to the next one. So the driver checks first, with MySQL's `SERVER_STATUS_IN_TRANS` flag after a `DO 0` and, on PostgreSQL, whether `transaction_timestamp()` differs from `statement_timestamp()` or the transaction has aborted. With a transaction open, Explain Analyze asks the user to commit or roll back.
+
+Some effects outlast the statement, and Explain Analyze doesn't block them: PostgreSQL's temporary sequences and session advisory locks, and MySQL and MariaDB user variables and named locks (`GET_LOCK`).
 
 `Connection::explain` runs the setup, the plan request and the reset while it holds the connection, so no other statement on that connection runs in between. The reset runs even when the plan request fails, and a failed reset statement is reported with the plan.
 
@@ -26,8 +31,9 @@ Explain Analyze shows the estimate instead of running anything but a query. The 
 
 The check has to read the statement the way the server does:
 
-- **One statement.** MySQL and MariaDB run every statement in the text they receive, so Explain refuses text that splits into more than one.
-- **Comments.** The tokenizer follows each server's rules. MySQL starts a `--` comment only before whitespace, so `1 --1` is arithmetic there, and PostgreSQL nests block comments. Explain Analyze refuses MySQL's `/*! … */` comments, whose text the server runs as part of the statement.
+- **One statement.** A plain query runs every statement in its text, so Explain refuses text that splits into more than one, and the driver prepares the plan request before running it. The prepared-statement protocol takes a single statement, so the server refuses a second one the tokenizer missed. MySQL 5.6 to 9.7, MariaDB 10.6 to 11.8 and PostgreSQL 12 to 18 prepare every EXPLAIN form the requests use.
+- **Comments.** MySQL starts a `--` comment only before an ASCII space or control character, so `1 --1` is arithmetic there, and PostgreSQL nests block comments. Explain Analyze refuses MySQL's `/*! … */` comments, whose text the server runs as part of the statement.
+- **Characters.** All three servers read any non-ASCII character, a no-break space included, as part of an identifier, and so does the tokenizer.
 - **SQLite PRAGMAs** are never explained, because SQLite applies some of them while preparing the statement, even under `EXPLAIN QUERY PLAN`.
 
 ## Formats
@@ -40,7 +46,7 @@ The check has to read the statement the way the server does:
 - **SQLite's query plan** is one row per step, with `id`, `parent`, `notused` and `detail`. It has no estimates and no actuals.
 - **SQLite's scan status** is what the driver returns for a measured run: a row for the statement, with the rows it returned and the time spent in `sqlite3_step`, then one per plan step with SQLite's `NLOOP`, `NVISIT`, `EST` and `NCYCLE`.
 
-A parser claims a result by its shape, not by which button ran it. A Run result opens as a plan only when its statement asks for one (`EXPLAIN`, `DESCRIBE`, or MariaDB's `ANALYZE`), so a query that returns plan-shaped JSON stays rows. A format without a parser shows the server's raw text.
+A parser claims a result by its shape, not by which button ran it. A Run result opens as a plan only when its statement asks for one (`EXPLAIN`, `DESCRIBE`, or MariaDB's `ANALYZE` and `SHOW EXPLAIN`), so a query that returns plan-shaped JSON stays rows. A format without a parser shows the server's raw text.
 
 ## Estimates and times
 

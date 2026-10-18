@@ -118,9 +118,11 @@ derived.
   the format and one that puts the session's own setting back.
 - **Explain Analyze never writes.** It shows the estimated plan, with a note, for any statement but
   a query and where the server can't measure (MySQL before 8.0.18, SQLite before 3.42). The rest
-  runs in a read-only transaction that is rolled back, because a query can still write through a
-  function such as `nextval`. A session with its own transaction open is refused, because the
-  statement would run in that transaction on PostgreSQL and commit it on MySQL.
+  runs read-only, because a query can still write through a function such as `nextval`: in a
+  rolled-back transaction on PostgreSQL, and under the session's read-only setting on MySQL and
+  MariaDB, where starting a transaction would release `LOCK TABLES` locks. Neither reaches a
+  transaction the session already has open, so such a session is refused. The driver prepares
+  the plan request first, so the server refuses a second statement that the tokenizer missed.
   `Connection::explain` holds the connection from the setup to the reset, so another tab's
   statement never lands in between, and a failed reset is shown in Messages.
 - **The statement's time is the longest any step reports**, not the root's: MySQL 8.0.18 can report

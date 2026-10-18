@@ -95,14 +95,19 @@ fn root_of(statement: &Object) -> Result<&Object, String> {
 
 fn add_children(plan: &mut Plan, parent: NodeId, object: &Object) -> Result<(), String> {
     let gather = matches!(object.get("Node Type").and_then(Json::as_str), Some("Gather" | "Gather Merge"));
+    let runs = plan.node(parent).actual.map_or(1, |a| a.loops.max(1));
     for child in object.get("Plans").and_then(Json::as_array).into_iter().flatten() {
         let child = child.as_object().ok_or("an entry of \"Plans\" is not an object")?;
         let mut node = node(child)?;
-        // A Gather's input runs once in each process, and every step below it shares them.
-        node.processes = match node.actual {
-            Some(actual) if gather => actual.loops.clamp(1, u32::MAX.into()) as u32,
-            _ => plan.node(parent).processes,
+        // Each time a Gather runs, its input runs once in every process, and the steps below
+        // share those processes. A step with fewer loops ran in fewer of them, such as a branch
+        // of a Parallel Append.
+        let processes = match node.actual {
+            Some(actual) if gather => actual.loops / runs,
+            Some(actual) => u64::from(plan.node(parent).processes).min(actual.loops),
+            None => plan.node(parent).processes.into(),
         };
+        node.processes = processes.clamp(1, u32::MAX.into()) as u32;
         let id = plan.add_child(parent, node);
         add_children(plan, id, child)?;
     }
@@ -410,6 +415,29 @@ mod tests {
         assert!((plan.inclusive_ms(partial).unwrap() - 653.62).abs() < 1e-9);
         assert!(plan.inclusive_ms(partial) < plan.inclusive_ms(NodeId::ROOT));
         assert_eq!(plan.total_ms(), Some(681.482));
+    }
+
+    #[test]
+    fn processes_follow_each_run_and_branch() {
+        let plan = parse_text(
+            r#"[{"Plan": {"Node Type": "Nested Loop", "Actual Total Time": 30, "Actual Rows": 5, "Actual Loops": 1,
+                "Plans": [
+                  {"Node Type": "Seq Scan", "Relation Name": "a", "Actual Total Time": 1, "Actual Rows": 5,
+                   "Actual Loops": 1},
+                  {"Node Type": "Gather", "Workers Launched": 2, "Actual Total Time": 5, "Actual Rows": 1,
+                   "Actual Loops": 5, "Plans": [
+                     {"Node Type": "Append", "Parallel Aware": true, "Actual Total Time": 4, "Actual Rows": 1,
+                      "Actual Loops": 15, "Plans": [
+                        {"Node Type": "Seq Scan", "Relation Name": "b", "Actual Total Time": 3,
+                         "Actual Rows": 1, "Actual Loops": 1}]}]}]}}]"#,
+        )
+        .unwrap();
+        let (gather, append, branch) = (NodeId(2), NodeId(3), NodeId(4));
+        assert_eq!(plan.node(gather).processes, 1);
+        assert_eq!(plan.node(append).processes, 3, "15 loops over the Gather's 5 runs");
+        assert!((plan.inclusive_ms(append).unwrap() - 20.0).abs() < 1e-9);
+        assert_eq!(plan.node(branch).processes, 1, "a branch one process ran keeps its own time");
+        assert_eq!(plan.inclusive_ms(branch), Some(3.0));
     }
 
     #[test]

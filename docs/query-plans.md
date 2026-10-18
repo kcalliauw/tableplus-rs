@@ -16,15 +16,19 @@ How tableplus-rs asks each engine for a plan and reads the answer into one model
 
 On MySQL 8.4 and later, a setup statement saves the session's `explain_json_format_version` in `@tableplus_explain_json_format` and sets it to 2, and a reset statement puts it back.
 
-Explain Analyze also makes the session read-only for the statement, and puts the session's own setting back afterwards:
+Explain Analyze runs the statement in a read-only transaction and rolls it back: `BEGIN READ ONLY` on PostgreSQL, `START TRANSACTION READ ONLY` on MySQL and MariaDB. A function that writes, such as `nextval`, fails, and PostgreSQL's writes to temporary tables are undone. Starting that transaction inside one the session already has open would run the statement in the user's transaction on PostgreSQL and commit it on MySQL, so the driver checks first: MySQL's `SERVER_STATUS_IN_TRANS` flag after a `DO 0`, and on PostgreSQL whether `transaction_timestamp()` differs from `statement_timestamp()`. With a transaction open, Explain Analyze asks the user to commit or roll back.
 
-- PostgreSQL saves `default_transaction_read_only` in the custom setting `tableplus.explain_read_only` with `set_config`, then turns it on.
-- MySQL saves `@@SESSION.transaction_read_only` in `@tableplus_explain_read_only`, then sets it to 1.
-- MariaDB does the same with `tx_read_only`, the only name MariaDB knows before 11.1.
+Some effects outlast the rollback, and Explain Analyze doesn't block them: PostgreSQL's session advisory locks, and MySQL and MariaDB user variables and named locks (`GET_LOCK`).
 
 `Connection::explain` runs the setup, the plan request and the reset while it holds the connection, so no other statement on that connection runs in between. The reset runs even when the plan request fails, and a failed reset statement is reported with the plan.
 
-Explain Analyze shows the estimate instead of running anything but a query. The check reads the statement's keywords: only a `SELECT`, `TABLE` or `VALUES` statement runs, after `WITH` clauses that are queries themselves, and never a `SELECT … INTO`. On SQLite the driver also refuses a statement that `sqlite3_stmt_readonly` reports as writing.
+Explain Analyze shows the estimate instead of running anything but a query. The check reads the statement's keywords: only a `SELECT`, `TABLE` or `VALUES` statement runs, after `WITH` clauses that are queries themselves, and never a `SELECT … INTO` or `TABLE … INTO`. On SQLite the driver also refuses a statement that `sqlite3_stmt_readonly` reports as writing.
+
+The check has to read the statement the way the server does:
+
+- **One statement.** MySQL and MariaDB run every statement in the text they receive, so Explain refuses text that splits into more than one.
+- **Comments.** The tokenizer follows each server's rules. MySQL starts a `--` comment only before whitespace, so `1 --1` is arithmetic there, and PostgreSQL nests block comments. Explain Analyze refuses MySQL's `/*! … */` comments, whose text the server runs as part of the statement.
+- **SQLite PRAGMAs** are never explained, because SQLite applies some of them while preparing the statement, even under `EXPLAIN QUERY PLAN`.
 
 ## Formats
 
@@ -32,11 +36,11 @@ Explain Analyze shows the estimate instead of running anything but a query. The 
 - **MySQL JSON version 1** nests query blocks, the operations around them (ordering, grouping, windowing) and the tables they read. It has estimates only, and costs from 5.7 on. A table's estimate is the rows it examines per scan, at its own read and evaluation cost; its `prefix_cost` belongs to the join it ends.
 - **MySQL JSON version 2** nests the same iterators as TREE through `inputs`, with actuals under `EXPLAIN ANALYZE`. A `heading` such as `Hash` becomes a node of its own, as TREE prints it on a line of its own. On every pair the lab captured, version 2 lists the same steps as TREE, and it keeps the table, schema, used columns, index, lookup and filter conditions and join algorithm as separate fields, at full precision where TREE rounds to three digits.
 - **MariaDB JSON** holds a `query_block`. From 10.11 on a join is a `nested_loop` array; in 10.6 it is a run of repeated `table` keys in one object, so objects are read with duplicate keys kept, in order.
-- **PostgreSQL JSON** is an array with one object per statement. Each has a `Plan` tree, whose children sit in `Plans`, beside plan-wide values such as `Planning Time` and `Triggers`.
+- **PostgreSQL JSON** is an array with one object per statement. Each has a `Plan` tree, whose children sit in `Plans`, beside plan-wide values such as `Planning Time` and `Triggers`. Below a `Gather`, each parallel worker and the leader counts as a loop, so a step's time over all its loops is divided by the number of processes that ran the Gather's input. serde_json stops at 128 nesting levels, which a 100-table join passes, so the parser reads without that limit up to 256 levels.
 - **SQLite's query plan** is one row per step, with `id`, `parent`, `notused` and `detail`. It has no estimates and no actuals.
 - **SQLite's scan status** is what the driver returns for a measured run: a row for the statement, with the rows it returned and the time spent in `sqlite3_step`, then one per plan step with SQLite's `NLOOP`, `NVISIT`, `EST` and `NCYCLE`.
 
-A parser claims a result by its shape, not by which button ran it. A format without a parser shows the server's raw text.
+A parser claims a result by its shape, not by which button ran it. A Run result opens as a plan only when its statement asks for one (`EXPLAIN`, `DESCRIBE`, or MariaDB's `ANALYZE`), so a query that returns plan-shaped JSON stays rows. A format without a parser shows the server's raw text.
 
 ## Estimates and times
 

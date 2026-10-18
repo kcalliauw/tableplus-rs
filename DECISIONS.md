@@ -118,9 +118,11 @@ derived.
   the format and one that puts the session's own setting back.
 - **Explain Analyze never writes.** It shows the estimated plan, with a note, for any statement but
   a query and where the server can't measure (MySQL before 8.0.18, SQLite before 3.42). The rest
-  runs in a read-only session, because a query can still write through a function such as
-  `nextval`. `Connection::explain` holds the connection from the setup to the reset, so another
-  tab's statement never lands in that session, and a failed reset is shown in Messages.
+  runs in a read-only transaction that is rolled back, because a query can still write through a
+  function such as `nextval`. A session with its own transaction open is refused, because the
+  statement would run in that transaction on PostgreSQL and commit it on MySQL.
+  `Connection::explain` holds the connection from the setup to the reset, so another tab's
+  statement never lands in between, and a failed reset is shown in Messages.
 - **The statement's time is the longest any step reports**, not the root's: MySQL 8.0.18 can report
   microseconds for a limit above a union that took milliseconds to materialize.
 

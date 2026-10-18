@@ -257,6 +257,30 @@ async fn exercise_explain_transactions(conn: &DynConnection, touch: &str, table:
     conn.query("UNLOCK TABLES", None).await.unwrap();
 }
 
+/// A statement over half of `max_allowed_packet` explains, and the connection stays open.
+async fn exercise_explain_large_statement(conn: &DynConnection) {
+    let packet = driver::scalar(conn.as_ref(), "SELECT @@max_allowed_packet").await.unwrap().unwrap();
+    let length = packet.parse::<usize>().unwrap() * 6 / 10;
+    explain(conn, &format!("SELECT LENGTH('{}')", "a".repeat(length)), ExplainMode::Estimate).await;
+    assert!(conn.query("SELECT 1", None).await.is_ok(), "the connection stays open");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mysql_explain_large_statement() {
+    let Some(conn) = connect_or_skip(&mysql_config(), &password()).await else {
+        return;
+    };
+    exercise_explain_large_statement(&conn).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mariadb_explain_large_statement() {
+    let Some(conn) = connect_or_skip(&mariadb_config(), &password()).await else {
+        return;
+    };
+    exercise_explain_large_statement(&conn).await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn mysql_explain_transactions() {
     let Some(conn) = connect_or_skip(&mysql_config(), &password()).await else {

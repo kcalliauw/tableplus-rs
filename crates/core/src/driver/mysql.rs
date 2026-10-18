@@ -181,12 +181,22 @@ fn s(v: &Option<String>) -> String {
 /// and sql_mode, as it reads the statement itself; `mysql_async`'s own prepare first scans for
 /// parameters with backslash escapes, and fails under NO_BACKSLASH_ESCAPES.
 async fn prepare(conn: &mut Conn, sql: &str) -> Result<()> {
-    let hex: String = sql.bytes().map(|b| format!("{b:02X}")).collect();
-    conn.query_drop(format!("SET @tableplus_explain_sql = X'{hex}'")).await.map_err(my_error)?;
-    let prepared = conn.query_drop("PREPARE tableplus_explain FROM @tableplus_explain_sql").await;
+    let prepared = stage_and_prepare(conn, sql.as_bytes()).await;
     conn.query_drop("SET @tableplus_explain_sql = NULL").await.map_err(my_error)?;
     prepared.map_err(my_error)?;
     conn.query_drop("DEALLOCATE PREPARE tableplus_explain").await.map_err(my_error)
+}
+
+/// Hex doubles the text, and a packet over `max_allowed_packet` (4 MiB on MySQL 5.7) closes the
+/// connection, so the text goes over in pieces.
+async fn stage_and_prepare(conn: &mut Conn, sql: &[u8]) -> mysql_async::Result<()> {
+    const CHUNK: usize = 256 * 1024;
+    conn.query_drop("SET @tableplus_explain_sql = X''").await?;
+    for chunk in sql.chunks(CHUNK) {
+        let hex: String = chunk.iter().map(|b| format!("{b:02X}")).collect();
+        conn.query_drop(format!("SET @tableplus_explain_sql = CONCAT(@tableplus_explain_sql, X'{hex}')")).await?;
+    }
+    conn.query_drop("PREPARE tableplus_explain FROM @tableplus_explain_sql").await
 }
 
 /// The server flags an open transaction in every OK packet; `DO 0` fetches a fresh one.

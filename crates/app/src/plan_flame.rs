@@ -11,6 +11,7 @@ use tableplus_core::plan::{NodeId, Plan, SPAN_SLACK};
 
 use crate::plan_view::PlanEvent;
 use crate::theme::palette;
+use crate::widgets::ease_out;
 use paint::{Look, header_strip, needs_times, paint_bar, tooltip};
 
 mod paint;
@@ -251,10 +252,6 @@ fn ancestry(plan: &Plan, id: NodeId) -> impl Iterator<Item = NodeId> + '_ {
 
 fn common_ancestor(plan: &Plan, a: NodeId, b: NodeId) -> NodeId {
     ancestry(plan, b).find(|n| ancestry(plan, a).any(|m| m == *n)).unwrap_or(NodeId::ROOT)
-}
-
-fn ease_out(t: f32) -> f32 {
-    1.0 - (1.0 - t).powi(3)
 }
 
 /// Draws the chart, or why there is none, and returns what the user picked.

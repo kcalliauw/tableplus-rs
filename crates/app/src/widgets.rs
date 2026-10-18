@@ -280,6 +280,10 @@ pub fn fmt_factor(f: f64) -> String {
     }
 }
 
+pub fn ease_out(t: f32) -> f32 {
+    1.0 - (1.0 - t).powi(3)
+}
+
 /// A modal dialog with the app's frame (padding, rounded corners, shadow).
 pub fn modal(ctx: &egui::Context, id: impl std::hash::Hash + std::fmt::Debug) -> egui::Modal {
     let style = ctx.global_style();

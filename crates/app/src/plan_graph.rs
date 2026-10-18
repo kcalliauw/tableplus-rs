@@ -17,6 +17,7 @@ use tableplus_core::plan::{Access, NodeId, Plan};
 use crate::icons::{self, Icon};
 use crate::plan_view::PlanEvent;
 use crate::theme::{self, palette};
+use crate::widgets::ease_out;
 use layout::{BOX_W, Layout};
 use paint::{
     Edge, Frame, Look, TextScale, cap, dots, fit_icon, fold_pill, fold_pill_rect, fold_stack, legend, paint_box,
@@ -274,10 +275,6 @@ impl GraphView {
 /// Where folded boxes come from and go: a smaller box centred on `at`.
 fn shrunk(at: Rect, like: Rect) -> Rect {
     Rect::from_center_size(at.center(), like.size() * 0.3)
-}
-
-fn ease_out(t: f32) -> f32 {
-    1.0 - (1.0 - t).powi(3)
 }
 
 /// Workbench's colours, but reading back a temporary result is a muted violet instead of red: no

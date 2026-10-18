@@ -14,7 +14,7 @@ use tableplus_core::plan::{NodeId, Plan, PlanNode};
 use super::{Metrics, PlanView, node_text};
 use crate::plan_graph;
 use crate::theme::{self, Palette, palette};
-use crate::widgets::{fmt_count, fmt_factor, fmt_ms, fmt_rows};
+use crate::widgets::{ease_out, fmt_count, fmt_factor, fmt_ms, fmt_rows};
 
 const ROW_H: f32 = 26.0;
 const HEADER_H: f32 = 28.0;
@@ -356,10 +356,6 @@ pub(super) fn show(ui: &mut Ui, id: Id, view: &mut PlanView) {
         view.selected = Some(node);
         view.detail_open = true;
     }
-}
-
-fn ease_out(t: f32) -> f32 {
-    1.0 - (1.0 - t).powi(3)
 }
 
 /// True when `node` is `ancestor` or below it.

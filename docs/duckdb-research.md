@@ -10,16 +10,17 @@ Versions in this document:
 
 ## 1. Summary
 
-**Short answer.** A DuckDB driver fits the existing design: one more `Connection` implementation, modelled on the SQLite driver (embedded, file-based, a blocking library behind `spawn_blocking`), plus a `Dialect`, a `Flavor`, a plan parser and a handful of UI branches. DuckDB's `EXPLAIN (ANALYZE, FORMAT JSON)` returns a real operator tree with estimated rows, actual rows and per-operator time, so the tree, graph and flame chart views work without engine-specific UI code.
+**Short answer.** A DuckDB driver fits the existing design: one more `Connection` implementation, modelled on the SQLite driver (embedded, file-based, a blocking library behind `spawn_blocking`), plus a `Dialect`, a `Flavor`, a plan parser and a handful of UI branches. DuckDB's `EXPLAIN (ANALYZE, FORMAT JSON)` returns a real operator tree with estimated rows, actual rows and per-operator time, so the tree, graph and flame chart views work without engine-specific UI code. The driver itself runs in a separate helper program that the app downloads on first use (section 7), so users who never open a DuckDB file keep a 20 MB app.
 
 **Recommended approach.**
 
 1. Use the official `duckdb` crate with the `bundled`, `json` and `parquet` features. Call the raw C API (`duckdb::ffi`) for the four things the crate hides: the statement count before running, the statement type, one shared instance per file, and query progress.
-2. Treat a DuckDB file like a SQLite file in the UI, but keep one DuckDB instance per file path for the whole app, and open each session with `try_clone()`.
+2. Treat a DuckDB file like a SQLite file in the UI, but keep one helper process per file path for the whole app. That helper holds one DuckDB instance and opens each session with `try_clone()`.
 3. Ask for plans with `EXPLAIN (FORMAT JSON)` and `EXPLAIN (ANALYZE, FORMAT JSON)`, run Explain Analyze inside `BEGIN TRANSACTION READ ONLY` … `ROLLBACK`, and label times as thread time scaled to the statement's latency, as SQLite's cycle shares are labelled today.
 4. Keep the seed as `docker/seed/duckdb.sql` and build `testdata/shop.duckdb` with an example binary, exactly as `shop.sqlite` is built today. A working draft seed is in `/tmp/duckdb-research/duckdb.sql`; it reproduces the SQLite shop row for row.
+5. Ship the DuckDB driver as a separate helper program, `tableplus-duckdb`, that the app downloads on first use and talks to over a pipe (section 7). The app stays at 20.4 MB, a DuckDB crash doesn't end the app, and the same design takes later engines that run locally. ClickHouse doesn't need it: it is a network server with a pure-Rust client that adds about 1.2 MiB.
 
-**Size of the work.** About 2,500 to 3,000 lines including tests, in four phases (section 7): connect and browse, then editing, then plans, then DuckDB-only features. For comparison, `driver/sqlite.rs` is 651 lines and `plan/postgres_json.rs` is 486. The binary grows by about 31 to 34 MB: the release app is 20.4 MB today (`target/release/tableplus-rs`, built 2026-10-18), and a stripped hello-world with bundled DuckDB is 31.8 MiB, 34.4 MiB with `json` and `parquet`. A cold release build of libduckdb-sys takes 64 to 87 s wall time and about 784 s of CPU on 18 cores.
+**Size of the work.** About 3,400 to 3,900 lines including tests and the helper (section 7), in five phases (section 8): connect and browse, then editing, then plans, then install on demand, then DuckDB-only features. For comparison, `driver/sqlite.rs` is 651 lines and `plan/postgres_json.rs` is 486. Linked into the app, the binary would grow by about 31 to 34 MB: the release app is 20.4 MB today (`target/release/tableplus-rs`, built 2026-10-18), and a stripped hello-world with bundled DuckDB is 31.8 MiB, 34.4 MiB with `json` and `parquet`. A cold release build of libduckdb-sys takes 64 to 87 s wall time and about 784 s of CPU on 18 cores. Shipped as a downloadable helper (section 7), the app stays at 20.4 MB.
 
 **Findings that shape the design**, each detailed below:
 
@@ -183,8 +184,8 @@ For the lossy or failing types (TIMETZ, TIME_NS, BIT, BIGNUM, VARIANT) there are
 | Config options | `threads`, `memory_limit`, `temp_directory`, `max_temp_directory_size`, `enable_external_access`, `autoload_known_extensions`, `autoinstall_known_extensions`, `allow_unsigned_extensions`, `lock_configuration` ([overview](https://duckdb.org/docs/current/configuration/overview), [securing](https://duckdb.org/docs/current/operations_manual/securing_duckdb/overview)) | New: a key and value list. `enable_external_access` and `allow_unsigned_extensions` can't be re-enabled at runtime **[ran]**. |
 | ATTACH more databases | `ATTACH 'f.duckdb' AS x (READ_ONLY)`, also `TYPE sqlite`, `TYPE postgres` and `TYPE mysql`, and Parquet or CSV files as views. Attachments are not persisted ([attach](https://duckdb.org/docs/current/sql/statements/attach)). | New: a list of attach statements run at connect. One transaction can write to only one attached database. |
 | MotherDuck | `md:` path or `ATTACH 'md:'`; the token comes from the `motherduck_token` environment variable or `md:db?motherduck_token=…` ([MotherDuck docs](https://motherduck.com/docs/key-tasks/authenticating-and-connecting-to-motherduck/authenticating-to-motherduck/)); needs the `motherduck` extension, downloaded at runtime ([core extension](https://duckdb.org/docs/current/core_extensions/motherduck)) | New: a remote mode with the token in the Keychain. Not available on windows_arm64. |
-| Extensions | `INSTALL x; LOAD x;`, `duckdb_extensions()` ([docs](https://duckdb.org/docs/current/extensions/overview)) | New: an extensions panel, or at least a policy (section 7). |
-| Test connection | `test_connection` opens, pings and closes (`driver/mod.rs:153-157`) | Existing. It must go through the per-path instance registry, or testing a file that is open breaks its lock. |
+| Extensions | `INSTALL x; LOAD x;`, `duckdb_extensions()` ([docs](https://duckdb.org/docs/current/extensions/overview)) | New: an extensions panel, or at least a policy (section 8). |
+| Test connection | `test_connection` opens, pings and closes (`driver/mod.rs:153-157`) | Existing. It must go through the path-to-helper map (section 7), or testing a file that is open breaks its lock. |
 | Cancel | `interrupt_handle()` | Existing. |
 | Progress | `duckdb_query_progress` through `ffi`, with `enable_progress_bar` on | New: the app has no progress UI. |
 | SSH tunnel, TLS | Not applicable | Existing UI hides them for file-based drivers. |
@@ -231,7 +232,7 @@ Two DuckDB 1.5.6 quirks the driver must work around **[ran]**:
 2. Flatten to `db.schema` labels, and teach `qualified` to quote `"db"."schema"."t"` for DuckDB. Every place that builds SQL from a `SchemaObject` already goes through `qualified`.
 3. Add a `database` field to `SchemaObject`. Cleanest, widest change.
 
-Option 2 is the smallest change that makes ATTACH useful; this is a decision for Koen (section 7).
+Option 2 is the smallest change that makes ATTACH useful; this is a decision for Koen (section 8).
 
 ### Editing
 
@@ -500,19 +501,92 @@ Keep DuckDB exactly parallel to SQLite:
 
 **Screenshots.** `demo-home.sh` gains a `Shop (DuckDB)` connection and builds `testdata/shop.duckdb` when it's missing; `screenshots.sh` copies it to `~/Databases/shop.duckdb`. The welcome list is sorted by name, so `Shop (DuckDB)` lands between `Prod replica (via SSH)` and `Shop (MySQL 8)`. `ROW_MYSQL`, `ROW_POSTGRES` and `ROW_SQLITE` (`screenshots.sh:100-104`) each move down one 58 px row, and `ROW_DUCKDB=353` is added. A new `scene_duckdb` could show the `type_zoo` grid with nested values and Explain Analyze of the existing screenshot query, which runs on DuckDB unchanged.
 
-## 7. Proposed build order and open questions
+## 7. Shipping DuckDB as a downloadable helper
+
+Linking DuckDB into the app makes every user pay for it: the 20.4 MB app grows by 31 to 34 MB (section 1) whether or not anyone opens a DuckDB file. This section describes how the DuckDB parts can be downloaded the first time they are needed instead, and how the same design takes more engines later. Nothing here was built; the ClickHouse size below is the only new measurement.
+
+### Options considered
+
+| Approach | How it works | Problems |
+|---|---|---|
+| Rust plugin library | The app loads a `.dylib` or `.so` holding the DuckDB driver | Rust has no stable binary interface, so a plugin must come from the exact compiler and dependency versions of the app it loads into. A C interface between them avoids that, but means hand-writing the whole boundary. |
+| Official `libduckdb` loaded at runtime | The app downloads DuckDB's own shared library and loads it on first use | The `duckdb` crate links the library when the app is built, so loading it later needs hand-written bindings for the C API. `bundle-macos.sh:70` signs with `--options runtime`, and the hardened runtime refuses a library signed by another team unless the app turns library validation off. A DuckDB crash, and any Rust panic in the driver, ends the whole app: the release profile sets `panic = "abort"` (`Cargo.toml`), and the crate panics on `TIME_NS` (section 3). Homebrew's `libduckdb.dylib` 1.5.6 is 47.1 MiB. |
+| **Separate helper program** (recommended) | The app downloads a `tableplus-duckdb` program on first use, starts it, and talks to it over its standard input and output | Requests and results cross a pipe, and each release builds and signs a second program per platform. |
+
+### The helper design
+
+```
+ app (20.4 MB, as today)                    tableplus-duckdb (~33 MB, downloaded)
+ ┌──────────────────────────┐               ┌───────────────────────────────┐
+ │ UI                       │               │ driver-host: pipe loop        │
+ │  │ Arc<dyn Connection>   │   requests    │ DuckDB driver (sections 2-5)  │
+ │  ▼                       │ ────────────▶ │ one instance, try_clone() per │
+ │ RemoteConnection         │ ◀──────────── │ session, interrupt handle     │
+ │ helper per file path     │ rows, plans,  └───────────────────────────────┘
+ └──────────────────────────┘ errors
+```
+
+- **Crates.** Two new workspace members. `crates/driver-host` is a library with the pipe loop every helper shares. `crates/engine-duckdb` is a binary that holds the DuckDB `Connection` implementation from sections 2 to 5 and whose `main` hands it to `driver_host::serve`. The driver code is the same as in the in-app plan; only where it is compiled changes.
+- **What stays in the app.** `Dialect::DuckDb`, `Flavor::DuckDb`, the plan parser, the `sqlgen.rs` and `alter.rs` arms, and the connection-dialog fields stay in `core` and `app`. They are small, the dialog must show DuckDB before the helper is installed, and the plan views then parse helper output with the same code as every other engine. The helper sends DuckDB's plan JSON as text, as the other drivers return it today.
+- **`RemoteConnection`.** One type in `core/src/driver/` implements `Connection` for any helper, and `connect()` gets a `DriverKind::DuckDb` arm that builds it. The UI keeps seeing an `Arc<dyn Connection>` and doesn't change.
+- **Messages.** One request per trait method: connect, query, query in batches, execute in transaction, explain, list databases, schemas and objects, table structure, object definition, cancel and ping. The first exchange is a handshake with the protocol version, engine name and engine version; the app refuses a helper whose versions don't match. Each request carries a session ID and a request ID, so several tabs share one helper and a reply finds its caller. `query_batches` answers with a stream of batch messages and a final count. Grid results already stop at `max_rows` and exports already arrive in batches, so the pipe never carries a whole table.
+- **Serializing results.** `StatementResult`, `Row`, `ColumnMeta`, `TableStructure` and the explain types don't derive `Serialize` today; in `model.rs` only two enums do. Adding the derives is mechanical but touches many types. JSON lines or a binary serde format such as `postcard` is a choice to make by measuring the shop data and the 50-million-row read from section 2.
+- **Cancel.** The helper reads its standard input on its own thread, so a cancel message arrives while a query runs and calls the session's interrupt handle.
+- **Process model.** One helper process per canonical file path, and one per connection for `:memory:`. The per-path registry from section 2 moves into the app as a map from path to helper process; every session and the Test button go through it, so a file is never opened twice. Inside the helper there is one DuckDB instance and `try_clone()` per session.
+- **Crashes.** When a helper exits, `RemoteConnection` returns an error naming the exit code or signal, and the next request starts a new helper. The app keeps running.
+- **Install on first use.** A list compiled into the app names each helper engine with its version, its download address, size and SHA-256 hash for each platform. Picking DuckDB in the connection dialog without the helper shows "DuckDB support isn't installed (33 MB). Install" with a progress bar. The helper goes to `<config dir>/engines/duckdb/<version>/`, where `<config dir>` is the app's configuration directory (`TABLEPLUS_RS_HOME` or the default in the README). The app checks the hash after the download and before each start, so it only runs the exact helper it was released with. A Settings list shows installed engines with update and remove, and "Install from file" covers machines without internet. This follows the decision for DuckDB extensions: nothing is downloaded without an explicit Install.
+- **macOS.** The helper is signed and notarized like the app. Files the app downloads with its own code don't get macOS's quarantine attribute; signing still matters for the hardened runtime and Gatekeeper.
+- **Development and tests.** The app looks for the helper in this order: a path in an environment variable, a binary next to its own executable (where `cargo build` puts it), then the installed copy. DuckDB integration tests live in `crates/engine-duckdb/tests/`, where Cargo provides the built helper as `CARGO_BIN_EXE_tableplus-duckdb`, so tests never download anything. Setting `default-members = ["crates/core", "crates/app"]` in the workspace keeps a plain `cargo build` from compiling DuckDB's C++ (64 to 87 s cold, section 3).
+
+### More engines later
+
+A helper only pays off when the engine runs inside the app or when a driver needs a large native library. A network database with a pure-Rust client stays built in, like Postgres and MySQL today.
+
+| Engine | Where it goes | Why |
+|---|---|---|
+| Postgres, MySQL, MariaDB, SQLite | Built in (today) | Small Rust clients |
+| ClickHouse | Built in | A network server. The official `clickhouse` crate 0.15.3 speaks ClickHouse's HTTP interface; with `native-tls`, which the app already uses, it grew a stripped tokio hello-world from 0.47 MiB to 1.65 MiB with the app's release profile **[ran]** (`/tmp/ch-size/`). |
+| DuckDB | Helper | The whole engine runs locally and adds 31 to 34 MB. |
+| chDB, embedded ClickHouse | Helper | It runs ClickHouse's engine locally, a much larger library than DuckDB's (not measured). |
+
+With a second helper engine the layout becomes:
+
+```
+crates/
+  core/            Connection trait, dialects, plan parsers, RemoteConnection, engine list
+  app/             UI, installer, Settings list of engines
+  driver-host/     pipe loop shared by every helper (library)
+  engine-duckdb/   helper: DuckDB's Connection + driver_host::serve()
+  engine-chdb/     helper: chDB's Connection + driver_host::serve()
+```
+
+- Each engine is a separate download, so a DuckDB user never fetches chDB, and each engine updates on its own.
+- Each engine picks its process model. DuckDB needs one process per file; an engine without that limit can use one per connection.
+- The messages mirror the `Connection` trait and never name an engine, so a second engine adds a binary crate and an entry in the engine list, not new pipe code. Building `driver-host` and `RemoteConnection` this way for DuckDB costs little extra.
+- The hash check means only helpers released with the app can run. Allowing helpers from other people would run their code with the user's permissions; that stays closed unless Koen decides otherwise.
+
+### Costs
+
+- A second program in each release, built, signed and notarized for every platform CI builds.
+- An HTTP client in the app for the download. The `clickhouse` measurement above includes `hyper` with `native-tls` at 1.18 MiB in total, so a download client should cost about 1 MiB or less (not measured on its own).
+- About 500 lines for `driver-host`, `RemoteConnection` and the messages, and about 400 for the installer and its Settings list. These are estimates.
+- Each batch is serialized, copied through the pipe and parsed. Not measured yet; phase 1 measures it before the format is fixed.
+
+## 8. Proposed build order and open questions
 
 ### Phases
 
-1. **Connect and browse.** `DriverKind::DuckDb`, `Dialect::DuckDb`, `Flavor::DuckDb` and their match arms. The driver with the per-path instance registry, `try_clone` per session, statement counting through `ffi`, streaming reads, `Count` and `Success` results, and value formatting with the cast fallback for TIMETZ, TIME_NS, BIT, BIGNUM and VARIANT. Catalog for the current database, cancel, the connection dialog (file, read-only, `:memory:`), the seed, `make_duckdb`, the fixture and `tests/duckdb.rs`. About 1,200 lines.
+1. **Helper, then connect and browse.** `Serialize` for the result and explain types, `crates/driver-host`, `RemoteConnection`, the path-to-helper map, the helper lookup for development and tests, and `default-members` (section 7). Measure the pipe cost on the shop data and the 50-million-row read, then fix the message format. `DriverKind::DuckDb`, `Dialect::DuckDb`, `Flavor::DuckDb` and their match arms. The driver in `crates/engine-duckdb`, with `try_clone` per session, statement counting through `ffi`, streaming reads, `Count` and `Success` results, and value formatting with the cast fallback for TIMETZ, TIME_NS, BIT, BIGNUM and VARIANT. Catalog for the current database, cancel, the connection dialog (file, read-only, `:memory:`), the seed, `make_duckdb`, the fixture and `crates/engine-duckdb/tests/`. About 1,700 lines.
 2. **Edit.** DuckDB arms in `dialect.rs` (the `from_hex` literal), `sqlgen.rs` (`ESCAPE '\'`) and `alter.rs` (Postgres-like, with the index and foreign-key limits surfaced or a rebuild), structure-view gating, and `exercise_editing` against DuckDB. About 400 lines.
 3. **Explain.** Request rules and the read-only recipe, the JSON parser with time scaling, `unestimated` and access rules, sections in `docs/query-plans.md` and `DECISIONS.md`, `plan_fixtures`, and the lab target. About 800 lines.
-4. **DuckDB extras.** The ATTACH list and two-level sidebar, config options, Parquet export and `read_csv` import, progress, an extensions policy, and MotherDuck. Each is optional and separate.
+4. **Install on demand.** The engine list with versions, addresses and hashes, the download with progress and hash check, the Install action in the connection dialog, the Settings list with update and remove, "Install from file", and CI jobs that build, sign and notarize the helper for each platform and publish it. About 400 lines plus CI.
+5. **DuckDB extras.** The ATTACH list and two-level sidebar, config options, Parquet export and `read_csv` import, progress, an extensions policy, and MotherDuck. Each is optional and separate.
 
 ### Open questions for Koen
 
-1. **Network extensions.** The bundled library downloads extensions on first use: ICU for time zones, the SQLite, Postgres and MySQL scanners, MotherDuck. Allow that, or turn auto-install off and show an "Install extension" action? Recommendation: auto-load on, auto-install off, and an explicit install action, so opening a file never reaches the network silently.
-2. **Binary size.** DuckDB adds about 31 to 34 MB to a 20 MB app, and 1 to 1.5 minutes to a cold build. Ship it in the default build, or behind a cargo feature? Recommendation: a `duckdb` feature that is on by default.
+1. **Network extensions.** Decided by Koen on 2026-10-19: auto-load on, auto-install off, and an explicit Install action, so opening a file never reaches the network silently.
+2. **Where the helper is downloaded from.** Koen chose on 2026-10-19 to keep the app at 20 MB, so DuckDB ships as a downloadable helper (section 7). GitHub releases fit, but upstream is michaelshimeles/tableplus-rs: either Michael publishes the helper with his releases, which needs his agreement, or the fork publishes it for now. This shapes what an upstream pull request contains, so it should be settled before phase 1.
 3. **Attached databases in the sidebar.** Current database only, `db.schema` labels, or a real database level (section 4)? Recommendation: `db.schema` labels.
 4. **Explain Analyze times.** Scale thread time to the statement's latency, as SQLite's cycle shares are scaled, or show raw thread time? Recommendation: scale.
 5. **MotherDuck.** In scope for the first release, or later? It needs a token field, the extension download, and plans from a partly remote engine that this research didn't capture.
+6. **Helpers from other people.** Only helpers released with the app, checked by hash, or a plugin system open to others? Recommendation: released helpers only.

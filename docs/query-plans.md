@@ -52,7 +52,7 @@ The check has to read the statement the way the server does:
 - **SQLite's query plan** is one row per step, with `id`, `parent`, `notused` and `detail`. It has no estimates and no actuals.
 - **SQLite's scan status** is what the driver returns for a measured run: a row for the statement, with the rows it returned and the time spent in `sqlite3_step`, then one per plan step with SQLite's `NLOOP`, `NVISIT`, `EST` and `NCYCLE`.
 
-A parser claims a result by its shape, not by which button ran it. A Run result opens as a plan only when its statement asks for one (`EXPLAIN`, `DESCRIBE`, or MariaDB's `ANALYZE` and `SHOW EXPLAIN`), so a query that returns plan-shaped JSON stays rows. A format without a parser shows the server's raw text.
+A parser claims a result by its shape, not by which button ran it. A Run result opens as a plan only when its statement asks for one (`EXPLAIN`, `DESCRIBE`, or MariaDB's `ANALYZE` and `SHOW EXPLAIN`), so a query that returns plan-shaped JSON stays rows. A format without a parser shows the server's raw text. Three look-alikes stay rows: `DESCRIBE orders` on MySQL and MariaDB lists the table's columns, MariaDB's `ANALYZE TABLE` updates statistics, and SQLite's `EXPLAIN` without `QUERY PLAN` lists bytecode.
 
 ## Estimates and times
 

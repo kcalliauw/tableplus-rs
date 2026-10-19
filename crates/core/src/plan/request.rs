@@ -173,8 +173,8 @@ pub fn request(server: &ServerInfo, sql: &str, mode: ExplainMode) -> Result<Expl
     if shape.asks_for_plan(server.flavor) {
         return Err(Unsupported("The statement already asks for a plan. Run it to see the plan.".into()));
     }
-    if shape.describes_table(server.flavor) {
-        return Err(Unsupported("The statement lists a table's columns, so it has no plan to explain.".into()));
+    if let Some(why) = shape.not_a_plan(server.flavor) {
+        return Err(Unsupported(why.into()));
     }
     if server.flavor == Sqlite && shape.word == "PRAGMA" {
         return Err(Unsupported("SQLite applies a PRAGMA while preparing it, so explaining one would run it.".into()));
@@ -321,17 +321,21 @@ impl StatementShape {
 
     fn asks_for_plan(&self, flavor: Flavor) -> bool {
         match self.verb.as_str() {
-            "EXPLAIN" | "DESCRIBE" => !self.describes_table(flavor),
-            "ANALYZE" => flavor == MariaDb,
+            "EXPLAIN" | "DESCRIBE" => self.not_a_plan(flavor).is_none(),
+            // MariaDB's `ANALYZE [FORMAT=JSON] SELECT …`, but not `ANALYZE [LOCAL] TABLE orders`, which
+            // updates the table's statistics.
+            "ANALYZE" => {
+                flavor == MariaDb && !matches!(self.next_word.as_str(), "TABLE" | "LOCAL" | "NO_WRITE_TO_BINLOG")
+            }
             // MariaDB's `SHOW EXPLAIN FOR <connection>` and `SHOW ANALYZE FOR …`.
             "SHOW" => flavor == MariaDb && matches!(self.next_word.as_str(), "EXPLAIN" | "ANALYZE"),
             _ => false,
         }
     }
 
-    /// MySQL's and MariaDB's `DESCRIBE orders` or `EXPLAIN orders`, which list a table's columns
-    /// instead of explaining a statement.
-    fn describes_table(&self, flavor: Flavor) -> bool {
+    /// Why an `EXPLAIN` or `DESCRIBE` returns something other than a plan: on MySQL and MariaDB
+    /// `DESCRIBE orders` lists a table's columns, and SQLite's `EXPLAIN SELECT …` lists bytecode.
+    fn not_a_plan(&self, flavor: Flavor) -> Option<&'static str> {
         const EXPLAINS: &[&str] = &[
             "(",
             "ANALYZE",
@@ -349,10 +353,17 @@ impl StatementShape {
             "VALUES",
             "WITH",
         ];
-        matches!(flavor, MySql | MariaDb)
-            && matches!(self.verb.as_str(), "EXPLAIN" | "DESCRIBE")
-            && !self.next_word.is_empty()
-            && !EXPLAINS.contains(&self.next_word.as_str())
+        match (flavor, self.verb.as_str()) {
+            (MySql | MariaDb, "EXPLAIN" | "DESCRIBE")
+                if !self.next_word.is_empty() && !EXPLAINS.contains(&self.next_word.as_str()) =>
+            {
+                Some("The statement lists a table's columns, so it has no plan to explain.")
+            }
+            (Sqlite, "EXPLAIN") if self.next_word != "QUERY" => {
+                Some("SQLite's EXPLAIN lists bytecode, not a plan. Explain the statement without it.")
+            }
+            _ => None,
+        }
     }
 
     /// The keyword that makes running the statement change data, if it would.
@@ -552,7 +563,14 @@ mod tests {
     }
 
     #[test]
-    fn describing_a_table_is_not_a_plan() {
+    fn analyzing_a_table_is_not_a_plan() {
+        for sql in ["analyze table orders", "ANALYZE LOCAL TABLE orders", "analyze no_write_to_binlog table orders"] {
+            assert!(!asks_for_plan(&MARIADB, sql), "{sql}");
+        }
+    }
+
+    #[test]
+    fn table_columns_and_bytecode_are_not_plans() {
         for (server, sql) in
             [(MYSQL_84, "describe orders"), (MYSQL_84, "desc `orders` status"), (MARIADB, "explain orders")]
         {
@@ -564,8 +582,10 @@ mod tests {
             (MYSQL_84, "explain (select 1)"),
             (MYSQL_84, "explain for connection 12"),
             (MARIADB, "explain extended select 1"),
+            (MARIADB, "analyze select 1"),
+            (MARIADB, "analyze format=json select 1"),
             (POSTGRES, "explain verbose select 1"),
-            (SQLITE, "explain select 1"),
+            (SQLITE, "explain query plan select 1"),
         ] {
             assert!(asks_for_plan(&server, sql), "{sql}");
         }

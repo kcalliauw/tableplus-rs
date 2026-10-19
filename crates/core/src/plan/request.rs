@@ -225,9 +225,10 @@ pub fn request(server: &ServerInfo, sql: &str, mode: ExplainMode) -> Result<Expl
 struct StatementShape {
     /// The first keyword in capitals, or empty when the statement starts with something else.
     verb: String,
-    /// The first word in capitals, keyword or not, and the one after it.
+    /// The first word in capitals, keyword or not, and the two after it.
     word: String,
     next_word: String,
+    third_word: String,
     cte_verbs: Vec<String>,
     select_into: bool,
     /// A MySQL or MariaDB `/*! … */` comment, whose text the server runs as part of the statement.
@@ -316,7 +317,15 @@ impl StatementShape {
                 (TokenKind::Keyword, w) => depth == 0 && w.eq_ignore_ascii_case("INTO"),
                 _ => false,
             });
-        Self { verb, word: word(i), next_word: word(i + 1), cte_verbs, select_into, executable_comment }
+        Self {
+            verb,
+            word: word(i),
+            next_word: word(i + 1),
+            third_word: word(i + 2),
+            cte_verbs,
+            select_into,
+            executable_comment,
+        }
     }
 
     fn asks_for_plan(&self, flavor: Flavor) -> bool {
@@ -336,27 +345,16 @@ impl StatementShape {
     /// Why an `EXPLAIN` or `DESCRIBE` returns something other than a plan: on MySQL and MariaDB
     /// `DESCRIBE orders` lists a table's columns, and SQLite's `EXPLAIN SELECT …` lists bytecode.
     fn not_a_plan(&self, flavor: Flavor) -> Option<&'static str> {
-        const EXPLAINS: &[&str] = &[
-            "(",
-            "ANALYZE",
-            "DELETE",
-            "EXTENDED",
-            "FOR",
-            "FORMAT",
-            "INSERT",
-            "INTO",
-            "PARTITIONS",
-            "REPLACE",
-            "SELECT",
-            "TABLE",
-            "UPDATE",
-            "VALUES",
-            "WITH",
-        ];
+        const STATEMENTS: &[&str] =
+            &["(", "DELETE", "INSERT", "REPLACE", "SELECT", "TABLE", "UPDATE", "VALUES", "WITH"];
+        let explains_statement = || match self.next_word.as_str() {
+            // Unreserved words, so they can also name a table, as in `DESCRIBE format`.
+            "FORMAT" => self.third_word == "=",
+            "EXTENDED" | "PARTITIONS" => STATEMENTS.contains(&self.third_word.as_str()),
+            w => w.is_empty() || matches!(w, "ANALYZE" | "FOR" | "INTO") || STATEMENTS.contains(&w),
+        };
         match (flavor, self.verb.as_str()) {
-            (MySql | MariaDb, "EXPLAIN" | "DESCRIBE")
-                if !self.next_word.is_empty() && !EXPLAINS.contains(&self.next_word.as_str()) =>
-            {
+            (MySql | MariaDb, "EXPLAIN" | "DESCRIBE") if !explains_statement() => {
                 Some("The statement lists a table's columns, so it has no plan to explain.")
             }
             (Sqlite, "EXPLAIN") if self.next_word != "QUERY" => {
@@ -581,6 +579,8 @@ mod tests {
             (MYSQL_84, "explain select 1"),
             (MYSQL_84, "explain (select 1)"),
             (MYSQL_84, "explain for connection 12"),
+            (MYSQL_84, "explain format = tree select 1"),
+            (MYSQL_57, "explain partitions select 1"),
             (MARIADB, "explain extended select 1"),
             (MARIADB, "analyze select 1"),
             (MARIADB, "analyze format=json select 1"),

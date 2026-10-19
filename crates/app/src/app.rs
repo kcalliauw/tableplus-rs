@@ -69,6 +69,8 @@ pub struct Shortcuts {
     pub commit: bool,
     pub run: bool,
     pub run_all: bool,
+    pub explain: bool,
+    pub explain_analyze: bool,
     pub refresh: bool,
     pub find: bool,
     pub new_connection: bool,
@@ -82,8 +84,11 @@ impl Shortcuts {
         let cmd = Modifiers::COMMAND;
         let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
         ctx.input_mut(|i| Shortcuts {
+            // `consume_shortcut` ignores extra Shift, so each ⇧ variant is consumed first.
             run_all: i.consume_shortcut(&sc(cmd_shift, Key::Enter)),
             run: i.consume_shortcut(&sc(cmd, Key::Enter)),
+            explain_analyze: i.consume_shortcut(&sc(cmd_shift, Key::E)),
+            explain: i.consume_shortcut(&sc(cmd, Key::E)),
             quick_open: i.consume_shortcut(&sc(cmd, Key::K)) | i.consume_shortcut(&sc(cmd, Key::P)),
             new_query: i.consume_shortcut(&sc(cmd, Key::T)),
             close_tab: i.consume_shortcut(&sc(cmd, Key::W)),
@@ -108,6 +113,8 @@ impl Shortcuts {
         self.commit |= o.commit;
         self.run |= o.run;
         self.run_all |= o.run_all;
+        self.explain |= o.explain;
+        self.explain_analyze |= o.explain_analyze;
         self.refresh |= o.refresh;
         self.find |= o.find;
         self.new_connection |= o.new_connection;
@@ -171,6 +178,8 @@ pub struct TablePlusApp {
     settings_open: bool,
     #[cfg(target_os = "macos")]
     menu: Option<crate::macos_menu::AppMenu>,
+    #[cfg(debug_assertions)]
+    dev_script: Option<crate::dev_script::DevScript>,
 }
 
 impl TablePlusApp {
@@ -208,6 +217,8 @@ impl TablePlusApp {
             settings_open: false,
             #[cfg(target_os = "macos")]
             menu: crate::macos_menu::AppMenu::install(),
+            #[cfg(debug_assertions)]
+            dev_script: crate::dev_script::DevScript::from_env(),
         };
         // `--connect <name>` opens a saved connection on startup.
         let mut args = std::env::args().skip(1);
@@ -820,7 +831,18 @@ fn session_chip(ui: &mut Ui, s: &Session, active: bool, index: usize, actions: &
 }
 
 impl eframe::App for TablePlusApp {
+    #[cfg(debug_assertions)]
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if let Some(script) = &mut self.dev_script {
+            script.feed(ctx, raw_input, &mut self.settings.theme);
+        }
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        #[cfg(debug_assertions)]
+        if let Some(script) = &mut self.dev_script {
+            script.frame_done(_frame.info().cpu_usage);
+        }
         let ctx = ui.ctx().clone();
         self.apply_theme(&ctx);
         self.poll();

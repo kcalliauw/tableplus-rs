@@ -1,18 +1,23 @@
 //! tableplus-rs: a fast, native database GUI.
 //!
 //! Environment:
-//! - `TABLEPLUS_RS_HOME` — config directory override (connections, history, settings)
+//! - `TABLEPLUS_RS_HOME` — config directory override (connections, history, settings, window state)
 //! - `TABLEPLUS_RENDERER=glow|wgpu` — force a renderer (default: wgpu on macOS, glow elsewhere)
 //! - `RUST_LOG` — log filter
 
 mod app;
 mod conn_dialog;
+#[cfg(debug_assertions)]
+mod dev_script;
 mod editor;
 mod export_dialog;
 mod grid;
 mod icons;
 #[cfg(target_os = "macos")]
 mod macos_menu;
+mod plan_flame;
+mod plan_graph;
+mod plan_view;
 mod query_tab;
 mod quick_open;
 mod session;
@@ -62,6 +67,21 @@ fn main() -> eframe::Result {
         viewport = viewport.with_fullsize_content_view(true).with_titlebar_shown(false).with_title_shown(false);
     }
 
-    let options = eframe::NativeOptions { viewport, renderer, centered: true, ..Default::default() };
+    let mut options = eframe::NativeOptions { viewport, renderer, centered: true, ..Default::default() };
+    // A scripted run feeds its input straight into egui, so it leaves keyboard focus with
+    // whatever the person at the machine is using.
+    #[cfg(all(debug_assertions, target_os = "macos"))]
+    if std::env::var_os("TABLEPLUS_DEV_SCRIPT").is_some() {
+        use winit::platform::macos::EventLoopBuilderExtMacOS;
+        // Floating, or the window of an app that isn't active stays behind and isn't painted.
+        options.viewport =
+            options.viewport.with_active(false).with_window_level(eframe::egui::WindowLevel::AlwaysOnTop);
+        options.event_loop_builder = Some(Box::new(|builder| {
+            builder.with_activate_ignoring_other_apps(false);
+        }));
+    }
+    if std::env::var_os("TABLEPLUS_RS_HOME").is_some() {
+        options.persistence_path = Some(tableplus_core::store::config_dir().join("app.ron"));
+    }
     eframe::run_native("tableplus-rs", options, Box::new(|cc| Ok(Box::new(app::TablePlusApp::new(cc, runtime)))))
 }

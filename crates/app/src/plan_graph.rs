@@ -225,21 +225,42 @@ impl GraphView {
         if plan.children(node).is_empty() {
             return false;
         }
-        let Some(prepared) = self.prepared.take() else { return false };
-        let before = prepared.layout.rects;
         self.collapsed[node.index()] = !self.collapsed[node.index()];
+        self.relayout(plan, node, now);
+        selected.is_some_and(|s| self.prepared.as_ref().is_some_and(|p| p.layout.rect(s).is_none()))
+    }
+
+    /// Unfolds the steps hiding `node`, as when it was picked in the tree. True when any were folded.
+    fn unfold_to(&mut self, plan: &Plan, node: NodeId, now: f64) -> bool {
+        let mut outermost = None;
+        let mut at = plan.parent(node);
+        while let Some(n) = at {
+            if self.collapsed[n.index()] {
+                self.collapsed[n.index()] = false;
+                outermost = Some(n);
+            }
+            at = plan.parent(n);
+        }
+        let Some(origin) = outermost else { return false };
+        self.relayout(plan, origin, now);
+        true
+    }
+
+    /// Lays the graph out again after a fold changed, keeping `origin` in place on screen while the
+    /// other boxes glide out of it or back into it.
+    fn relayout(&mut self, plan: &Plan, origin: NodeId, now: f64) {
+        let Some(prepared) = self.prepared.take() else { return };
+        let before = prepared.layout.rects;
         let next = prepare(plan, &self.collapsed);
-        if let (Some(a), Some(b)) = (before[node.index()], next.layout.rect(node)) {
+        if let (Some(a), Some(b)) = (before[origin.index()], next.layout.rect(origin)) {
             let d = b.center() - a.center();
             self.camera.center += d;
             if let Some(f) = &mut self.flight {
                 f.shift(d);
             }
         }
-        let hides_selected = selected.is_some_and(|s| next.layout.rect(s).is_none());
         self.prepared = Some(next);
-        self.motion = Some(Motion { from: before, origin: node, start: now });
-        hides_selected
+        self.motion = Some(Motion { from: before, origin, start: now });
     }
 
     /// Every step's box this frame, with its opacity: in place, or gliding after a fold.
@@ -409,13 +430,17 @@ pub fn show(
         selected = Some(node);
     }
 
-    // Keep the selection in view after it moves, or when the graph comes back into view.
+    // Keep the selection in view after it moves, or when the graph comes back into view. A step
+    // picked in the tree or flame chart may sit inside a branch folded here; open it first.
     if selected != view.last_selected {
         view.last_selected = selected;
         view.reveal = 2;
     }
     if view.reveal > 0 {
         view.reveal -= 1;
+        if let Some(s) = selected {
+            view.unfold_to(plan, s, now);
+        }
         if let Some(rect) = selected.and_then(|s| view.prepared.as_ref()?.layout.rect(s)) {
             view.reveal_rect(canvas, rect.expand(8.0), now);
         }
@@ -704,6 +729,20 @@ mod tests {
         assert_eq!(layout.rect(inner), None, "the folded step's inputs are hidden");
         let after = view.camera.rect(canvas(), layout.rect(hash).unwrap());
         assert!((after.center() - before.center()).length() < 0.01, "the folded step stays where it was");
+    }
+
+    #[test]
+    fn a_step_picked_inside_a_folded_branch_unfolds_it() {
+        let (plan, [_, scan, hash, inner, _]) = analyzed();
+        let mut view = view(&plan);
+        view.toggle(&plan, hash, 0.0, None);
+        let before = view.camera.rect(canvas(), view.prepared.as_ref().unwrap().layout.rect(hash).unwrap());
+        assert!(!view.unfold_to(&plan, scan, 1.0), "nothing folded above the scan");
+        assert!(view.unfold_to(&plan, inner, 1.0), "the hash is folded above its inner scan");
+        let layout = &view.prepared.as_ref().unwrap().layout;
+        assert!(layout.rect(inner).is_some(), "the picked step is shown again");
+        let after = view.camera.rect(canvas(), layout.rect(hash).unwrap());
+        assert!((after.center() - before.center()).length() < 0.01, "the unfolded step stays where it was");
     }
 
     // Each layout size rasterizes the font again, so a zoom gesture must pass through only a few.

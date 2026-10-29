@@ -178,8 +178,6 @@ pub struct TablePlusApp {
     settings_open: bool,
     #[cfg(target_os = "macos")]
     menu: Option<crate::macos_menu::AppMenu>,
-    #[cfg(debug_assertions)]
-    dev_script: Option<crate::dev_script::DevScript>,
 }
 
 impl TablePlusApp {
@@ -217,8 +215,6 @@ impl TablePlusApp {
             settings_open: false,
             #[cfg(target_os = "macos")]
             menu: crate::macos_menu::AppMenu::install(),
-            #[cfg(debug_assertions)]
-            dev_script: crate::dev_script::DevScript::from_env(),
         };
         // `--connect <name>` opens a saved connection on startup.
         let mut args = std::env::args().skip(1);
@@ -831,18 +827,7 @@ fn session_chip(ui: &mut Ui, s: &Session, active: bool, index: usize, actions: &
 }
 
 impl eframe::App for TablePlusApp {
-    #[cfg(debug_assertions)]
-    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
-        if let Some(script) = &mut self.dev_script {
-            script.feed(ctx, raw_input, &mut self.settings.theme);
-        }
-    }
-
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
-        #[cfg(debug_assertions)]
-        if let Some(script) = &mut self.dev_script {
-            script.frame_done(_frame.info().cpu_usage);
-        }
         let ctx = ui.ctx().clone();
         self.apply_theme(&ctx);
         self.poll();

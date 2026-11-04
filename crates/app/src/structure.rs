@@ -173,7 +173,9 @@ impl StructureEditor {
         }
         let p = palette(ui);
         let dialect = ctx.dialect;
-        let editable = object.kind == tableplus_core::model::ObjectKind::Table;
+        let table = object.kind == tableplus_core::model::ObjectKind::Table;
+        let read_only = dialect.read_only_reason().filter(|_| table);
+        let editable = table && read_only.is_none();
         egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
             ui.add_space(12.0);
             egui::Frame::new().inner_margin(egui::Margin::symmetric(16, 0)).show(ui, |ui| {
@@ -184,6 +186,9 @@ impl StructureEditor {
                         ui.label(widgets::muted(ui, format!("— {c}")));
                     }
                 });
+                if let Some(why) = read_only {
+                    ui.label(widgets::muted(ui, format!("Read-only. {why}")).size(12.0));
+                }
                 ui.add_space(4.0);
                 header_row(
                     ui,

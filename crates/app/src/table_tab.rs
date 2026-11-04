@@ -280,7 +280,17 @@ impl TableTab {
     }
 
     fn editable(&self) -> bool {
-        self.object.kind == tableplus_core::model::ObjectKind::Table && self.structure.is_some()
+        self.object.kind == tableplus_core::model::ObjectKind::Table
+            && self.structure.is_some()
+            && self.dialect().read_only_reason().is_none()
+    }
+
+    /// The tooltip of a row action, with why it's off when the database can't edit rows here.
+    fn row_action_tip(&self, action: &str) -> String {
+        match self.dialect().read_only_reason() {
+            Some(why) => format!("{action}\n{why}"),
+            None => action.to_string(),
+        }
     }
 
     fn handle_grid_events(&mut self, events: Vec<GridEvent>, ctx: &mut TabCtx) {
@@ -589,7 +599,8 @@ impl TableTab {
             ui.add_space(6.0);
             if self.view == TableView::Data {
                 let editable = self.editable();
-                if widgets::icon_button_sized(ui, Icon::Plus, "Add row", vec2(26.0, 24.0), editable).clicked() {
+                let tip = self.row_action_tip("Add row");
+                if widgets::icon_button_sized(ui, Icon::Plus, &tip, vec2(26.0, 24.0), editable).clicked() {
                     let ncols = self.result.as_ref().map_or(0, |r| r.columns.len());
                     self.staged.add_row(ncols);
                     let rows = self.result.as_ref().map_or(0, |r| r.rows.len());
@@ -599,7 +610,7 @@ impl TableTab {
                 if widgets::icon_button_sized(
                     ui,
                     Icon::Minus,
-                    "Delete selected rows",
+                    &self.row_action_tip("Delete selected rows"),
                     vec2(26.0, 24.0),
                     editable && has_sel,
                 )

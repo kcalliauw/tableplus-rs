@@ -111,9 +111,12 @@ impl ConnDialog {
 
             // Driver picker.
             ui.horizontal(|ui| {
+                let gap = ui.spacing().item_spacing.x;
+                let count = DriverKind::ALL.len() as f32;
+                let tile_w = (ui.available_width() - gap * (count - 1.0)) / count;
                 for d in DriverKind::ALL {
                     let selected = self.config.driver == d;
-                    let (rect, resp) = ui.allocate_exact_size(vec2(132.0, 48.0), Sense::click());
+                    let (rect, resp) = ui.allocate_exact_size(vec2(tile_w, 48.0), Sense::click());
                     let stroke = if selected { Stroke::new(1.5, p.accent) } else { Stroke::new(1.0, p.border) };
                     let fill = if selected {
                         p.accent.gamma_multiply(0.08)
@@ -123,13 +126,13 @@ impl ConnDialog {
                         p.content_bg
                     };
                     ui.painter().rect(rect, CornerRadius::same(8), fill, stroke, StrokeKind::Inside);
-                    let badge = egui::Rect::from_min_size(rect.min + vec2(10.0, 10.0), vec2(28.0, 28.0));
+                    let badge = egui::Rect::from_min_size(rect.min + vec2(8.0, 12.0), vec2(24.0, 24.0));
                     driver_badge(ui, badge, d);
                     ui.painter().text(
-                        egui::pos2(badge.right() + 9.0, rect.center().y),
+                        egui::pos2(badge.right() + 7.0, rect.center().y),
                         egui::Align2::LEFT_CENTER,
                         d.label(),
-                        theme::ui_font(12.5),
+                        theme::ui_font(12.0),
                         p.text,
                     );
                     if resp.clicked() {

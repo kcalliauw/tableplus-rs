@@ -146,6 +146,11 @@ impl TsvReader {
         self.partial.drain(..start);
     }
 
+    /// The exception the server wrote after its rows, once one has started to arrive.
+    pub fn exception(&self) -> Option<String> {
+        self.exception.as_deref().map(exception_message)
+    }
+
     /// Ends the body: an error when the server reported one after its rows, or when the body
     /// stopped inside a line.
     pub fn finish(self) -> Result<(), String> {
@@ -311,6 +316,7 @@ mod tests {
             b"'FUNCTION throwIf'. (FUNCTION_THROW_IF_VALUE_IS_NON_ZERO) (version 25.8.33.6 (official build))\n\n",
         ]);
         assert_eq!(rows.len(), 2);
+        assert!(reader.exception().unwrap().starts_with("Code: 395."));
         let err = reader.finish().unwrap_err();
         assert!(err.starts_with("Code: 395. DB::Exception: boom") && err.ends_with("(official build))"), "{err}");
         // Older servers append the text straight after the rows.

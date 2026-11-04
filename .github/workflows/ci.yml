@@ -26,7 +26,7 @@ jobs:
         run: cargo fmt --all --check
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Tests (unit + PostgreSQL / MySQL / MariaDB / SQLite / SSH integration)
+      - name: Tests (unit + PostgreSQL / MySQL / MariaDB / SQLite / ClickHouse / SSH integration)
         run: cargo test --workspace
         env:
           TABLEPLUS_REQUIRE_DB: "1"

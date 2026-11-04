@@ -11,10 +11,12 @@ pub enum DriverKind {
     MySql,
     MariaDb,
     Sqlite,
+    ClickHouse,
 }
 
 impl DriverKind {
-    pub const ALL: [DriverKind; 4] = [DriverKind::Postgres, DriverKind::MySql, DriverKind::MariaDb, DriverKind::Sqlite];
+    pub const ALL: [DriverKind; 5] =
+        [DriverKind::Postgres, DriverKind::MySql, DriverKind::MariaDb, DriverKind::Sqlite, DriverKind::ClickHouse];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -22,6 +24,7 @@ impl DriverKind {
             DriverKind::MySql => "MySQL",
             DriverKind::MariaDb => "MariaDB",
             DriverKind::Sqlite => "SQLite",
+            DriverKind::ClickHouse => "ClickHouse",
         }
     }
 
@@ -32,6 +35,7 @@ impl DriverKind {
             DriverKind::MySql => "My",
             DriverKind::MariaDb => "Ma",
             DriverKind::Sqlite => "Sl",
+            DriverKind::ClickHouse => "Ch",
         }
     }
 
@@ -40,6 +44,7 @@ impl DriverKind {
             DriverKind::Postgres => 5432,
             DriverKind::MySql | DriverKind::MariaDb => 3306,
             DriverKind::Sqlite => 0,
+            DriverKind::ClickHouse => 8123,
         }
     }
 
@@ -48,6 +53,7 @@ impl DriverKind {
             DriverKind::Postgres => "postgres",
             DriverKind::MySql | DriverKind::MariaDb => "root",
             DriverKind::Sqlite => "",
+            DriverKind::ClickHouse => "default",
         }
     }
 
@@ -56,6 +62,7 @@ impl DriverKind {
             DriverKind::Postgres => Dialect::Postgres,
             DriverKind::MySql | DriverKind::MariaDb => Dialect::MySql,
             DriverKind::Sqlite => Dialect::Sqlite,
+            DriverKind::ClickHouse => Dialect::ClickHouse,
         }
     }
 
@@ -303,14 +310,15 @@ fn percent_decode(s: &str) -> String {
 }
 
 impl ConnectionConfig {
-    /// Parses `postgres://user:pass@host:5432/db?sslmode=require`, `mysql://…`, `mariadb://…`
-    /// or `sqlite:///path/to/file.db`. Returns the config and the password, if any.
+    /// Parses `postgres://user:pass@host:5432/db?sslmode=require`, `mysql://…`, `mariadb://…`,
+    /// `clickhouse://…` or `sqlite:///path/to/file.db`. Returns the config and the password, if any.
     pub fn from_url(url: &str) -> Result<(ConnectionConfig, Option<String>), String> {
         let (scheme, rest) = url.split_once("://").ok_or("URL must look like scheme://user@host/db")?;
         let driver = match scheme.to_ascii_lowercase().as_str() {
             "postgres" | "postgresql" | "pg" => DriverKind::Postgres,
             "mysql" => DriverKind::MySql,
             "mariadb" => DriverKind::MariaDb,
+            "clickhouse" => DriverKind::ClickHouse,
             "sqlite" | "sqlite3" | "file" => DriverKind::Sqlite,
             other => return Err(format!("Unsupported scheme \"{other}\"")),
         };
@@ -393,6 +401,14 @@ mod tests {
         assert_eq!((c.driver, c.port, pw), (DriverKind::MySql, 3306, None));
         let (c, _) = ConnectionConfig::from_url("mariadb://u:x@[::1]:3307").unwrap();
         assert_eq!((c.host.as_str(), c.port, c.database.as_str()), ("::1", 3307, ""));
+        let (c, pw) = ConnectionConfig::from_url("clickhouse://tp:tp_pass@ch.example.com:8443/shop").unwrap();
+        assert_eq!(
+            (c.driver, c.user.as_str(), c.host.as_str(), c.port, c.database.as_str()),
+            (DriverKind::ClickHouse, "tp", "ch.example.com", 8443, "shop")
+        );
+        assert_eq!(pw.as_deref(), Some("tp_pass"));
+        let (c, _) = ConnectionConfig::from_url("clickhouse://localhost").unwrap();
+        assert_eq!((c.port, c.user.as_str()), (8123, "default"));
         let (c, _) = ConnectionConfig::from_url("sqlite:///tmp/my%20db.sqlite").unwrap();
         assert_eq!(c.path, "/tmp/my db.sqlite");
         assert!(ConnectionConfig::from_url("redis://x").is_err());

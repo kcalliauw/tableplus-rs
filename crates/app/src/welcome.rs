@@ -24,6 +24,8 @@ pub fn driver_color(driver: DriverKind) -> Color32 {
         DriverKind::MySql => Color32::from_rgb(0x00, 0x75, 0x8F),
         DriverKind::MariaDb => Color32::from_rgb(0xA0, 0x5A, 0x3C),
         DriverKind::Sqlite => Color32::from_rgb(0x0F, 0x80, 0xCC),
+        // ClickHouse's yellow, darkened so the white badge text stays readable.
+        DriverKind::ClickHouse => Color32::from_rgb(0x9A, 0x7B, 0x00),
     }
 }
 

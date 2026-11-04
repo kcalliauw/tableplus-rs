@@ -1,5 +1,5 @@
-//! The database abstraction used by the UI, plus the PostgreSQL, MySQL/MariaDB and SQLite
-//! implementations.
+//! The database abstraction used by the UI, plus the PostgreSQL, MySQL/MariaDB, SQLite and
+//! ClickHouse implementations.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -66,6 +66,7 @@ pub async fn connect(config: &ConnectionConfig, creds: &Credentials) -> Result<D
         DriverKind::Postgres => Arc::new(postgres::PgConnection::connect(config, creds).await?),
         DriverKind::MySql | DriverKind::MariaDb => Arc::new(mysql::MyConnection::connect(config, creds).await?),
         DriverKind::Sqlite => Arc::new(sqlite::SqliteConnection::open(config).await?),
+        DriverKind::ClickHouse => Arc::new(clickhouse::ChConnection::connect(config, creds).await?),
     })
 }
 

@@ -50,6 +50,16 @@ pub fn mariadb_config() -> ConnectionConfig {
     c
 }
 
+pub fn clickhouse_config() -> ConnectionConfig {
+    let mut c = ConnectionConfig::new(DriverKind::ClickHouse);
+    c.name = "test clickhouse".into();
+    c.host = env_or("TP_CLICKHOUSE_HOST", "127.0.0.1");
+    c.port = env_or("TP_CLICKHOUSE_PORT", "18123").parse().unwrap();
+    c.user = "tp".into();
+    c.database = "shop".into();
+    c
+}
+
 pub fn password() -> Credentials {
     Credentials { password: Some("tp_pass".into()), ..Default::default() }
 }

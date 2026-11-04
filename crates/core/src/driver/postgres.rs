@@ -436,7 +436,13 @@ impl Connection for PgConnection {
             })
             .collect();
         let comment = self.meta(&format!("SELECT obj_description({oid}, 'pg_class')")).await?;
-        Ok(TableStructure { columns, indexes, constraints, comment: comment.first().and_then(|r| r[0].clone()) })
+        Ok(TableStructure {
+            columns,
+            indexes,
+            constraints,
+            comment: comment.first().and_then(|r| r[0].clone()),
+            sorting_key: Vec::new(),
+        })
     }
 
     async fn object_definition(&self, o: &SchemaObject) -> Result<String> {

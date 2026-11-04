@@ -367,6 +367,7 @@ mod tests {
                 definition: "REFERENCES \"countries\" (\"code\")".into(),
             }],
             comment: None,
+            sorting_key: Vec::new(),
         }
     }
 

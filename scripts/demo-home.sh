@@ -28,7 +28,10 @@ cat > "$HOME_DIR/connections.json" <<JSON
     { "id": "00000000-0000-4000-8000-000000000005", "name": "Prod replica (via SSH)", "driver": "Postgres", "color": "Red",
       "env": "Production", "host": "postgres", "port": 5432, "user": "tp", "database": "shop", "save_password": true,
       "tls": { "mode": "Require" },
-      "ssh": { "enabled": true, "host": "127.0.0.1", "port": 22229, "user": "tunnel", "auth": "PrivateKey", "key_path": "$KEY" } }
+      "ssh": { "enabled": true, "host": "127.0.0.1", "port": 22229, "user": "tunnel", "auth": "PrivateKey", "key_path": "$KEY" } },
+    { "id": "00000000-0000-4000-8000-000000000006", "name": "Events (ClickHouse)", "driver": "ClickHouse", "color": "Yellow",
+      "env": "Testing", "host": "127.0.0.1", "port": 18123, "user": "tp", "database": "shop",
+      "save_password": true, "tls": { "mode": "Disable" } }
   ]
 }
 JSON
@@ -37,7 +40,8 @@ cat > "$HOME_DIR/secrets.json" <<JSON
   "00000000-0000-4000-8000-000000000001:password": "tp_pass",
   "00000000-0000-4000-8000-000000000002:password": "tp_pass",
   "00000000-0000-4000-8000-000000000003:password": "tp_pass",
-  "00000000-0000-4000-8000-000000000005:password": "tp_pass"
+  "00000000-0000-4000-8000-000000000005:password": "tp_pass",
+  "00000000-0000-4000-8000-000000000006:password": "tp_pass"
 }
 JSON
 chmod 600 "$HOME_DIR/secrets.json"

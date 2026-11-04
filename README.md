@@ -1,7 +1,7 @@
 # tableplus-rs
 
 A fast, native database GUI in the spirit of [TablePlus](https://tableplus.com), written in Rust.
-One ~30 MB binary, no Electron, no web view: PostgreSQL, MySQL, MariaDB and SQLite, with SSH
+One ~30 MB binary, no Electron, no web view: PostgreSQL, MySQL, MariaDB, SQLite and ClickHouse, with SSH
 tunnels, TLS, a virtualized data grid with staged editing, a structure editor that generates
 `ALTER` statements, and a SQL editor with schema-aware autocomplete.
 
@@ -14,11 +14,11 @@ runs on Linux, which is where the screenshots below were taken (Xvfb, software r
 
 **Connections**
 - Saved connections with name, colour tag and environment label (local/development/testing/staging/production), grouped and searchable on the welcome screen
-- PostgreSQL, MySQL 8, MariaDB, SQLite
+- PostgreSQL, MySQL 8, MariaDB, SQLite, ClickHouse (over its HTTP interface; its tables are read-only in the grid and structure editor, because ClickHouse has no transactions and its sorting key doesn't identify a row)
 - Passwords in the macOS Keychain (a `0600` file elsewhere); optional "ask every time"
 - SSH tunnels (password or private key, with passphrase); host keys are checked against `~/.ssh/known_hosts` and a changed key is refused
 - TLS: disable / prefer / require / verify-ca / verify-full, optional CA certificate
-- Paste a URL (`postgres://…`, `mysql://…`, `mariadb://…`, `sqlite:///path`) to fill the form; **Test** before saving
+- Paste a URL (`postgres://…`, `mysql://…`, `mariadb://…`, `clickhouse://…`, `sqlite:///path`) to fill the form; **Test** before saving
 - Several sessions open at once, switched from the toolbar
 
 **Browsing**
@@ -28,7 +28,7 @@ runs on Linux, which is where the screenshots below were taken (Xvfb, software r
 
 **Data grid**
 - Custom-painted, virtualized grid: only visible cells are laid out, so a page of 1,000 rows or a 100,000-row query result scrolls smoothly; sticky header and row numbers, resizable columns, keyboard navigation and multi-row selection
-- Server-side pagination (100–20,000 rows per page) with exact row counts, sorting (shift-click for multi-column; the primary key is appended as a tiebreaker so paging stays stable) and a filter bar with `=, <>, <, >, <=, >=, contains, begins/ends with, IN, IS NULL, BETWEEN` and raw SQL conditions
+- Server-side pagination (100–20,000 rows per page) with exact row counts, sorting (shift-click for multi-column; the primary key, or ClickHouse's sorting key, is appended as a tiebreaker so paging stays stable) and a filter bar with `=, <>, <, >, <=, >=, contains, begins/ends with, IN, IS NULL, BETWEEN` and raw SQL conditions
 - Inline editing: double-click or Enter/F2, Tab to the next cell; set NULL / DEFAULT / empty string; add, duplicate and delete rows
 - Edits are **staged** (yellow = modified, green = inserted, red = deleted), reviewed as SQL, and committed in one transaction with `⌘S` — or discarded
 - Copy cells, or rows as TSV / CSV / JSON / `INSERT` statements; filter by a cell's value
@@ -41,7 +41,7 @@ runs on Linux, which is where the screenshots below were taken (Xvfb, software r
 - Syntax highlighting for each dialect, line numbers
 - Autocomplete for keywords, functions, schemas, tables and columns — alias-aware (`u.` lists the columns of `users u`), and quiet inside comments and strings
 - Run the statement under the cursor or the selection (`⌘↩`), or everything (`⌘⇧↩`); one result tab per statement plus a Messages tab with timings, affected rows and errors pointing at the failing statement
-- Explain (`⌘E`) shows the planner's estimates without running the statement; Explain Analyze (`⌘⇧E`) runs it and measures each step, for MySQL, MariaDB, PostgreSQL and SQLite. Plans open as a collapsible tree with estimated and actual rows, loops and time bars, a Workbench-style graph coloured by how each table is read, and a flame chart; a detail panel lists every value the server reported. A hand-typed `EXPLAIN` gets the same view. Explain Analyze shows the estimated plan instead of running a statement that writes (`INSERT`, `UPDATE`, `DELETE`, a data-changing CTE, `SELECT … INTO`), and runs the rest read-only, so a query that writes through a function such as `nextval` fails instead of changing data. With a transaction already open, Explain Analyze asks you to commit or roll back first.
+- Explain (`⌘E`) shows the planner's estimates without running the statement; Explain Analyze (`⌘⇧E`) runs it and measures each step, for MySQL, MariaDB, PostgreSQL and SQLite. On ClickHouse, Explain shows the server's `EXPLAIN indexes = 1` text, and Explain Analyze isn't available. Plans open as a collapsible tree with estimated and actual rows, loops and time bars, a Workbench-style graph coloured by how each table is read, and a flame chart; a detail panel lists every value the server reported. A hand-typed `EXPLAIN` gets the same view. Explain Analyze shows the estimated plan instead of running a statement that writes (`INSERT`, `UPDATE`, `DELETE`, a data-changing CTE, `SELECT … INTO`), and runs the rest read-only, so a query that writes through a function such as `nextval` fails instead of changing data. With a transaction already open, Explain Analyze asks you to commit or roll back first.
 - Query history per connection, searchable, reopenable
 - Results are capped (100,000 rows by default) and can be cancelled
 
@@ -106,9 +106,10 @@ Environment variables:
 
 ## Trying it with the demo databases
 
-`docker/compose.yml` starts PostgreSQL 17, MySQL 8.4, MariaDB 11 and an SSH bastion, each seeded with
-the same shop schema (users, products, orders, 50,000 orders, 2,000,000 analytics events, every
-column type the drivers handle). `scripts/demo-home.sh` writes a config directory with saved
+`docker/compose.yml` starts PostgreSQL 17, MySQL 8.4, MariaDB 11, ClickHouse 25.8 and an SSH bastion,
+each seeded with the same shop schema (users, products, orders, 50,000 orders, 2,000,000 analytics
+events, every column type the drivers handle; ClickHouse has a smaller set with 5,000 orders, a view,
+a materialized view and 250,000 events). `scripts/demo-home.sh` writes a config directory with saved
 connections to all of them plus a generated SQLite file:
 
 ```sh
@@ -122,6 +123,7 @@ TABLEPLUS_RS_HOME=/tmp/tp-demo cargo run --release
 | PostgreSQL | `127.0.0.1:54329/shop` | `tp` / `tp_pass` |
 | MySQL 8 | `127.0.0.1:33069/shop` | `tp` / `tp_pass` |
 | MariaDB | `127.0.0.1:33070/shop` | `tp` / `tp_pass` |
+| ClickHouse | `127.0.0.1:18123/shop` (HTTP) | `tp` / `tp_pass` |
 | SSH bastion | `127.0.0.1:22229`, user `tunnel`, key `docker/sshd/test_key` | reaches `postgres:5432` |
 | SQLite | `testdata/shop.sqlite` | |
 
@@ -186,7 +188,8 @@ rendering, so GPU-backed macOS numbers will be better), against the docker datab
 ```
 crates/core   tableplus-core — no UI code
   driver/       Connection trait + PostgreSQL (tokio-postgres), MySQL/MariaDB (mysql_async),
-                SQLite (rusqlite, on a blocking thread); introspection, text-protocol results,
+                SQLite (rusqlite, on a blocking thread), ClickHouse (reqwest over its HTTP
+                interface, TabSeparated results); introspection, text-protocol results,
                 transactions, cancellation, streaming query_batches
   tunnel.rs     SSH port forwarding with russh, known_hosts check
   sqlgen.rs     SELECT/COUNT with filters, sorting and paging; UPDATE/INSERT/DELETE for staged edits
@@ -217,5 +220,6 @@ other trade-offs are explained in [DECISIONS.md](DECISIONS.md).
 - Redis and MongoDB (listed as stretch goals) are not supported.
 - SSH agent authentication and jump hosts; client TLS certificates.
 - Editing query results (only table views are editable — they have a known primary key).
+- Editing ClickHouse rows or columns from the grid and structure editor; ClickHouse plans as a tree, graph or flame chart (the Plan tab shows the server's text).
 - The macOS build is compiled and unit-tested in CI and its platform code was type-checked locally, but
   the screenshots and interactive testing above were done on Linux.

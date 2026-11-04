@@ -1,6 +1,6 @@
 //! Which statements ask a server for a plan, by engine and version. The rules come from the
 //! EXPLAIN capability matrix captured from 18 servers (MySQL 5.6 to 9.7, MariaDB 10.6 to 11.8,
-//! PostgreSQL 12 to 18 and SQLite 3.53).
+//! PostgreSQL 12 to 18 and SQLite 3.53), plus ClickHouse, whose EXPLAIN never runs the statement.
 
 use crate::dialect::Dialect;
 use crate::server::{Flavor, ServerInfo, Version};
@@ -122,7 +122,7 @@ const fn read_only(flavor: Flavor) -> (&'static [&'static str], &'static [&'stat
                  @@SESSION.tx_read_only = @tableplus_explain_read_only",
             ],
         ),
-        Flavor::Sqlite => (&[], &[]),
+        Flavor::Sqlite | Flavor::ClickHouse => (&[], &[]),
     }
 }
 
@@ -133,7 +133,7 @@ const MYSQL_JSON_V2: Version = Version::new(8, 4, 0);
 const SQLITE_SCAN_STATUS: Version = Version::new(3, 42, 0);
 
 use ExplainMode::{Analyze, Estimate};
-use Flavor::{MariaDb, MySql, Postgres, Sqlite};
+use Flavor::{ClickHouse, MariaDb, MySql, Postgres, Sqlite};
 
 const RULES: &[Rule] = &[
     wrap(MySql, Estimate, ANY, "EXPLAIN FORMAT=JSON ", PlanFormat::MySqlJson),
@@ -154,6 +154,13 @@ const RULES: &[Rule] = &[
         since: SQLITE_SCAN_STATUS,
         recipe: Recipe::Measure(PlanFormat::SqliteScanStatus),
     },
+    wrap(ClickHouse, Estimate, ANY, "EXPLAIN indexes = 1 ", PlanFormat::ClickHouseText),
+    unsupported(
+        ClickHouse,
+        Analyze,
+        ANY,
+        "ClickHouse has no Explain Analyze: its EXPLAIN describes the plan without running the statement.",
+    ),
 ];
 
 /// Whether running `sql` asks `server` for a plan, as a hand-typed `EXPLAIN` does.
@@ -179,6 +186,14 @@ pub fn request(server: &ServerInfo, sql: &str, mode: ExplainMode) -> Result<Expl
     if server.flavor == Sqlite && shape.word == "PRAGMA" {
         return Err(Unsupported("SQLite applies a PRAGMA while preparing it, so explaining one would run it.".into()));
     }
+    let rule = RULES
+        .iter()
+        .filter(|r| r.flavor == server.flavor && r.mode == mode && r.since <= server.version)
+        .max_by_key(|r| r.since)
+        .expect("every flavor and mode has a rule for any version");
+    if let Recipe::Unsupported(reason) = rule.recipe {
+        return Err(Unsupported(reason.into()));
+    }
     if mode == Analyze && shape.executable_comment {
         return Err(Unsupported(
             "Explain Analyze runs the statement, and it can't check what a /*! … */ comment adds to it.".into(),
@@ -189,11 +204,6 @@ pub fn request(server: &ServerInfo, sql: &str, mode: ExplainMode) -> Result<Expl
     {
         return Err(Unsupported(format!("Explain Analyze runs the statement, and this {write} would change data.")));
     }
-    let rule = RULES
-        .iter()
-        .filter(|r| r.flavor == server.flavor && r.mode == mode && r.since <= server.version)
-        .max_by_key(|r| r.since)
-        .expect("every flavor and mode has a rule for any version");
     match rule.recipe {
         Recipe::Wrap { prefix, format, setup, reset } => {
             let (ro_setup, ro_reset) = if mode == Analyze { read_only(server.flavor) } else { (&[][..], &[][..]) };
@@ -360,6 +370,7 @@ impl StatementShape {
             (Sqlite, "EXPLAIN") if self.next_word != "QUERY" => {
                 Some("SQLite's EXPLAIN lists bytecode, not a plan. Explain the statement without it.")
             }
+            (ClickHouse, "DESCRIBE") => Some("The statement lists a table's columns, so it has no plan to explain."),
             _ => None,
         }
     }
@@ -392,6 +403,7 @@ mod tests {
     const MARIADB: ServerInfo = ServerInfo::new(MariaDb, Version::new(11, 4, 13));
     const POSTGRES: ServerInfo = ServerInfo::new(Postgres, Version::new(17, 6, 0));
     const SQLITE: ServerInfo = ServerInfo::new(Sqlite, Version::new(3, 53, 2)).with_scan_status(true);
+    const CLICKHOUSE: ServerInfo = ServerInfo::new(ClickHouse, Version::new(25, 8, 33));
 
     fn explain(server: ServerInfo, sql: &str, mode: ExplainMode) -> Result<String, String> {
         request(&server, sql, mode).map(|r| r.explain.sql().to_string()).map_err(|e| e.0)
@@ -416,6 +428,7 @@ mod tests {
                 PlanFormat::PostgresJson,
             ),
             (SQLITE, Estimate, "EXPLAIN QUERY PLAN select * from orders", PlanFormat::SqliteQueryPlan),
+            (CLICKHOUSE, Estimate, "EXPLAIN indexes = 1 select * from orders", PlanFormat::ClickHouseText),
         ] {
             let r = request(&server, q, mode).unwrap_or_else(|e| panic!("{server} {mode:?}: {e}"));
             assert_eq!(r.explain, Explain::Statement(expected.into()), "{server} {mode:?}");
@@ -461,7 +474,7 @@ mod tests {
 
     #[test]
     fn every_engine_has_a_rule_for_every_version() {
-        for flavor in [MySql, MariaDb, Postgres, Sqlite] {
+        for flavor in [MySql, MariaDb, Postgres, Sqlite, ClickHouse] {
             for mode in [Estimate, Analyze] {
                 assert!(
                     RULES.iter().any(|r| r.flavor == flavor && r.mode == mode && r.since == ANY),
@@ -469,6 +482,19 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn clickhouse_explains_without_analyze() {
+        for sql in ["select 1", "alter table t update a = 1 where 1"] {
+            let why = explain(CLICKHOUSE, sql, Analyze).unwrap_err();
+            assert!(why.contains("ClickHouse has no Explain Analyze"), "{sql}: {why}");
+        }
+        assert!(explain(CLICKHOUSE, "EXPLAIN PIPELINE SELECT 1", Estimate).unwrap_err().contains("already"));
+        assert!(asks_for_plan(&CLICKHOUSE, "explain syntax select 1"));
+        assert!(!asks_for_plan(&CLICKHOUSE, "describe table orders"));
+        assert!(!asks_for_plan(&CLICKHOUSE, "desc orders"));
+        assert!(explain(CLICKHOUSE, "describe orders", Estimate).unwrap_err().contains("columns"));
     }
 
     #[test]

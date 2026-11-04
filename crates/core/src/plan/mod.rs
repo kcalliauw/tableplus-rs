@@ -48,6 +48,8 @@ pub enum PlanFormat {
     /// What SQLite measured per plan step while the statement ran (`sqlite3_stmt_scanstatus_v2`).
     /// Step times are shares of counted CPU cycles, not timed.
     SqliteScanStatus,
+    /// ClickHouse `EXPLAIN` text, one line per row. There is no parser for it.
+    ClickHouseText,
 }
 
 impl PlanFormat {
@@ -60,6 +62,7 @@ impl PlanFormat {
             PlanFormat::PostgresJson => "PostgreSQL JSON",
             PlanFormat::SqliteQueryPlan => "SQLite query plan",
             PlanFormat::SqliteScanStatus => "SQLite scan status (times from CPU cycles)",
+            PlanFormat::ClickHouseText => "ClickHouse text",
         }
     }
 }

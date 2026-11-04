@@ -13,6 +13,7 @@ pub enum Flavor {
     MySql,
     MariaDb,
     Sqlite,
+    ClickHouse,
 }
 
 impl Flavor {
@@ -22,6 +23,7 @@ impl Flavor {
             Flavor::MySql => "MySQL",
             Flavor::MariaDb => "MariaDB",
             Flavor::Sqlite => "SQLite",
+            Flavor::ClickHouse => "ClickHouse",
         }
     }
 
@@ -30,6 +32,7 @@ impl Flavor {
             Flavor::Postgres => Dialect::Postgres,
             Flavor::MySql | Flavor::MariaDb => Dialect::MySql,
             Flavor::Sqlite => Dialect::Sqlite,
+            Flavor::ClickHouse => Dialect::ClickHouse,
         }
     }
 }
@@ -121,6 +124,7 @@ mod tests {
             ("16.15 (Debian 16.15-1.pgdg120+1)", Version::new(16, 15, 0)),
             ("18beta1", Version::new(18, 0, 0)),
             ("3.53.2", Version::new(3, 53, 2)),
+            ("25.8.33.6", Version::new(25, 8, 33)),
         ] {
             assert_eq!(Version::parse(text), Some(expected), "{text}");
         }

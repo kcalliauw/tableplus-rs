@@ -17,6 +17,7 @@ use crate::server::ServerInfo;
 /// Receives rows in batches from [`Connection::query_batches`].
 pub type BatchSink<'a> = dyn FnMut(&[ColumnMeta], Vec<Row>) -> Result<()> + Send + 'a;
 
+pub mod clickhouse;
 pub mod mysql;
 pub mod postgres;
 pub mod sqlite;

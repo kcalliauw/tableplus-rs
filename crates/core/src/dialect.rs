@@ -9,12 +9,14 @@ pub enum Dialect {
     Postgres,
     MySql,
     Sqlite,
+    ClickHouse,
 }
 
 impl Dialect {
     pub fn quote_ident(self, ident: &str) -> String {
         match self {
             Dialect::MySql => format!("`{}`", ident.replace('`', "``")),
+            Dialect::ClickHouse => format!("`{}`", ident.replace('\\', "\\\\").replace('`', "\\`")),
             Dialect::Postgres | Dialect::Sqlite => format!("\"{}\"", ident.replace('"', "\"\"")),
         }
     }
@@ -35,8 +37,8 @@ impl Dialect {
         for c in s.chars() {
             match c {
                 '\'' => out.push_str("''"),
-                '\\' if self == Dialect::MySql => out.push_str("\\\\"),
-                '\0' if self == Dialect::MySql => out.push_str("\\0"),
+                '\\' if self.backslash_escapes() => out.push_str("\\\\"),
+                '\0' if self.backslash_escapes() => out.push_str("\\0"),
                 c => out.push(c),
             }
         }
@@ -49,6 +51,7 @@ impl Dialect {
         match self {
             Dialect::Postgres => format!("'\\x{}'::bytea", hex.to_ascii_lowercase()),
             Dialect::MySql | Dialect::Sqlite => format!("X'{hex}'"),
+            Dialect::ClickHouse => format!("unhex('{hex}')"),
         }
     }
 
@@ -56,6 +59,8 @@ impl Dialect {
         match (self, b) {
             (Dialect::Sqlite, true) => "1",
             (Dialect::Sqlite, false) => "0",
+            (Dialect::ClickHouse, true) => "true",
+            (Dialect::ClickHouse, false) => "false",
             (_, true) => "TRUE",
             (_, false) => "FALSE",
         }
@@ -101,6 +106,24 @@ impl Dialect {
             Dialect::Postgres => "PostgreSQL",
             Dialect::MySql => "MySQL",
             Dialect::Sqlite => "SQLite",
+            Dialect::ClickHouse => "ClickHouse",
+        }
+    }
+
+    /// Whether a backslash starts an escape sequence inside a string literal.
+    pub fn backslash_escapes(self) -> bool {
+        matches!(self, Dialect::MySql | Dialect::ClickHouse)
+    }
+
+    /// Why the data grid and the structure editor can't change this database's rows or columns,
+    /// or `None` when they can. Imports and the SQL editor still write.
+    pub fn read_only_reason(self) -> Option<&'static str> {
+        match self {
+            Dialect::Postgres | Dialect::MySql | Dialect::Sqlite => None,
+            Dialect::ClickHouse => Some(
+                "ClickHouse has no transactions and its sorting key doesn't identify a row, so edits here could \
+                 change other rows or apply halfway. Use ALTER TABLE in the SQL editor.",
+            ),
         }
     }
 
@@ -156,6 +179,28 @@ impl Dialect {
                 "enum('a','b')",
             ],
             Dialect::Sqlite => &["INTEGER", "REAL", "TEXT", "BLOB", "NUMERIC", "BOOLEAN", "DATE", "DATETIME"],
+            Dialect::ClickHouse => &[
+                "UInt8",
+                "UInt32",
+                "UInt64",
+                "Int32",
+                "Int64",
+                "Float64",
+                "Decimal(18,4)",
+                "String",
+                "LowCardinality(String)",
+                "FixedString(16)",
+                "UUID",
+                "Date",
+                "Date32",
+                "DateTime",
+                "DateTime64(3)",
+                "Bool",
+                "Array(String)",
+                "Map(String, String)",
+                "Nullable(String)",
+                "JSON",
+            ],
         }
     }
 }
@@ -176,6 +221,7 @@ mod tests {
         assert_eq!(Dialect::Postgres.qualified("public", "users"), "\"public\".\"users\"");
         assert_eq!(Dialect::Sqlite.qualified("main", "users"), "\"users\"");
         assert_eq!(Dialect::MySql.qualified("", "users"), "`users`");
+        assert_eq!(Dialect::ClickHouse.qualified("shop", "a`b\\c"), "`shop`.`a\\`b\\\\c`");
     }
 
     #[test]
@@ -183,6 +229,7 @@ mod tests {
         assert_eq!(Dialect::Postgres.quote_str("it's \\ ok"), "'it''s \\ ok'");
         assert_eq!(Dialect::MySql.quote_str("it's \\ ok"), "'it''s \\\\ ok'");
         assert_eq!(Dialect::Sqlite.quote_str("x"), "'x'");
+        assert_eq!(Dialect::ClickHouse.quote_str("it's \\ ok\0"), "'it''s \\\\ ok\\0'");
     }
 
     #[test]
@@ -195,5 +242,8 @@ mod tests {
         assert_eq!(Dialect::Postgres.edit_literal("bytea", "0xDEAD"), "'\\xdead'::bytea");
         assert_eq!(Dialect::Postgres.edit_literal("integer", "12"), "'12'");
         assert_eq!(Dialect::MySql.edit_literal("bit(8)", "165"), "165");
+        assert_eq!(Dialect::ClickHouse.literal(&Value::Bytes(vec![0xAB, 0x01].into())), "unhex('AB01')");
+        assert_eq!(Dialect::ClickHouse.literal(&Value::Bool(false)), "false");
+        assert!(Dialect::ClickHouse.read_only_reason().is_some() && Dialect::MySql.read_only_reason().is_none());
     }
 }

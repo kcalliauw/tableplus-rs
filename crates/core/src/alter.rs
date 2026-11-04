@@ -95,6 +95,9 @@ pub fn alter_statements(
     current: &TableStructure,
     changes: &[StructureChange],
 ) -> Result<Vec<String>, String> {
+    if let Some(why) = dialect.read_only_reason() {
+        return Err(why.into());
+    }
     if dialect == Dialect::Sqlite && needs_sqlite_rebuild(current, changes) {
         return sqlite_rebuild(schema, table, current, changes);
     }
@@ -138,6 +141,7 @@ pub fn alter_statements(
                     format!("DROP INDEX {}", dialect.qualified(schema, name))
                 }
                 Dialect::MySql => format!("DROP INDEX {} ON {t}", q(name)),
+                Dialect::ClickHouse => format!("ALTER TABLE {t} DROP INDEX {}", q(name)),
             }),
             StructureChange::DropConstraint { name, kind } => out.push(match (dialect, kind) {
                 (Dialect::MySql, ConstraintKind::ForeignKey) => {
@@ -199,6 +203,7 @@ fn modify_column(dialect: Dialect, t: &str, orig: &ColumnInfo, new: &ColumnDef, 
                 out.push(format!("COMMENT ON COLUMN {t}.{col} IS {c}"));
             }
         }
+        Dialect::ClickHouse => unreachable!("alter_statements refuses read-only dialects"),
         Dialect::Sqlite => {
             // Only reached for pure renames; everything else goes through the rebuild.
             if renamed {

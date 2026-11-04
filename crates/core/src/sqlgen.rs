@@ -105,6 +105,8 @@ fn text_cast(dialect: Dialect, expr: &str) -> String {
     match dialect {
         Dialect::Postgres | Dialect::Sqlite => format!("CAST({expr} AS TEXT)"),
         Dialect::MySql => format!("CAST({expr} AS CHAR)"),
+        // A CAST of a NULL to the non-nullable String fails; toString keeps it NULL.
+        Dialect::ClickHouse => format!("toString({expr})"),
     }
 }
 
@@ -123,7 +125,9 @@ fn like_expr(dialect: Dialect, column_expr: &str, pattern: &str, negate: bool) -
     let not = if negate { "NOT " } else { "" };
     let pattern = dialect.quote_str(pattern);
     match dialect {
-        Dialect::Postgres => format!("{} {not}ILIKE {pattern}", text_cast(dialect, column_expr)),
+        Dialect::Postgres | Dialect::ClickHouse => {
+            format!("{} {not}ILIKE {pattern}", text_cast(dialect, column_expr))
+        }
         Dialect::MySql => format!("{} {not}LIKE {pattern}", text_cast(dialect, column_expr)),
         Dialect::Sqlite => format!("{} {not}LIKE {pattern} ESCAPE '\\'", text_cast(dialect, column_expr)),
     }
@@ -266,7 +270,7 @@ pub fn select_page_sql(
         None if offset > 0 => match dialect {
             Dialect::MySql => sql.push_str(&format!(" LIMIT 18446744073709551615 OFFSET {offset}")),
             Dialect::Sqlite => sql.push_str(&format!(" LIMIT -1 OFFSET {offset}")),
-            Dialect::Postgres => sql.push_str(&format!(" OFFSET {offset}")),
+            Dialect::Postgres | Dialect::ClickHouse => sql.push_str(&format!(" OFFSET {offset}")),
         },
         None => {}
     }
@@ -355,7 +359,7 @@ impl RowIdentity {
         match dialect {
             Dialect::Postgres => (format!("ctid = (SELECT ctid FROM {table} WHERE {pred} LIMIT 1)"), ""),
             Dialect::Sqlite => (format!("rowid = (SELECT rowid FROM {table} WHERE {pred} LIMIT 1)"), ""),
-            Dialect::MySql => (pred, " LIMIT 1"),
+            Dialect::MySql | Dialect::ClickHouse => (pred, " LIMIT 1"),
         }
     }
 }
@@ -427,6 +431,11 @@ mod tests {
             Filter { column: Some("name".into()), op: FilterOp::Contains, value: "50%".into(), ..Default::default() };
         assert_eq!(filter_condition(Dialect::Postgres, &f, &all).unwrap(), "CAST(\"name\" AS TEXT) ILIKE '%50\\%%'");
         assert_eq!(filter_condition(Dialect::MySql, &f, &all).unwrap(), "CAST(`name` AS CHAR) LIKE '%50\\\\%%'");
+        assert_eq!(filter_condition(Dialect::ClickHouse, &f, &all).unwrap(), "toString(`name`) ILIKE '%50\\\\%%'");
+        assert_eq!(
+            select_page_sql(Dialect::ClickHouse, "shop", "t", None, &[], None, 20),
+            "SELECT * FROM `shop`.`t` OFFSET 20"
+        );
         assert_eq!(
             filter_condition(Dialect::Sqlite, &f, &all).unwrap(),
             "CAST(\"name\" AS TEXT) LIKE '%50\\%%' ESCAPE '\\'"

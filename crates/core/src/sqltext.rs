@@ -226,9 +226,124 @@ pub const FUNCTIONS: &[&str] = &[
     "upper",
 ];
 
-pub fn is_keyword(word: &str) -> bool {
+/// ClickHouse's keywords beyond [`KEYWORDS`], in the same sorted order.
+const CLICKHOUSE_KEYWORDS: &[&str] = &[
+    "ALIAS",
+    "ANTI",
+    "ASOF",
+    "ATTACH",
+    "CLUSTER",
+    "CODEC",
+    "CUBE",
+    "DEDUPLICATE",
+    "DETACH",
+    "DICTIONARY",
+    "ENGINE",
+    "EPHEMERAL",
+    "FILL",
+    "FINAL",
+    "FORMAT",
+    "FREEZE",
+    "GLOBAL",
+    "INTERPOLATE",
+    "KILL",
+    "MODIFY",
+    "OPTIMIZE",
+    "POPULATE",
+    "PREWHERE",
+    "PROJECTION",
+    "QUALIFY",
+    "ROLLUP",
+    "SAMPLE",
+    "SEMI",
+    "SETTINGS",
+    "SYNC",
+    "TOTALS",
+    "TTL",
+];
+
+/// Common ClickHouse functions. Names in mixed case are matched case-sensitively by the server.
+const CLICKHOUSE_FUNCTIONS: &[&str] = &[
+    "any",
+    "anyLast",
+    "argMax",
+    "argMin",
+    "arrayFilter",
+    "arrayJoin",
+    "arrayMap",
+    "avg",
+    "cityHash64",
+    "coalesce",
+    "concat",
+    "count",
+    "countIf",
+    "dateDiff",
+    "formatDateTime",
+    "formatReadableSize",
+    "generateUUIDv4",
+    "greatest",
+    "groupArray",
+    "groupUniqArray",
+    "has",
+    "if",
+    "ifNull",
+    "intDiv",
+    "JSONExtract",
+    "JSONExtractString",
+    "least",
+    "length",
+    "lower",
+    "match",
+    "max",
+    "median",
+    "min",
+    "multiIf",
+    "now",
+    "parseDateTimeBestEffort",
+    "position",
+    "quantile",
+    "replaceAll",
+    "replaceRegexpAll",
+    "round",
+    "splitByChar",
+    "substring",
+    "sum",
+    "sumIf",
+    "toDate",
+    "toDateTime",
+    "toDecimal64",
+    "toFloat64",
+    "toInt64",
+    "toStartOfDay",
+    "toStartOfHour",
+    "toStartOfMonth",
+    "toString",
+    "toTypeName",
+    "toUInt64",
+    "toUnixTimestamp",
+    "toYYYYMM",
+    "today",
+    "topK",
+    "uniq",
+    "uniqExact",
+    "upper",
+];
+
+/// The dialect's keywords: [`KEYWORDS`] and, for ClickHouse, its own.
+pub fn keywords(dialect: Dialect) -> impl Iterator<Item = &'static str> {
+    let extra: &[&str] = if dialect == Dialect::ClickHouse { CLICKHOUSE_KEYWORDS } else { &[] };
+    KEYWORDS.iter().chain(extra).copied()
+}
+
+/// Functions offered by autocomplete.
+pub fn functions(dialect: Dialect) -> &'static [&'static str] {
+    if dialect == Dialect::ClickHouse { CLICKHOUSE_FUNCTIONS } else { FUNCTIONS }
+}
+
+pub fn is_keyword(word: &str, dialect: Dialect) -> bool {
     let upper = word.to_ascii_uppercase();
-    KEYWORDS.binary_search(&upper.as_str()).is_ok()
+    let found = |list: &[&str]| list.binary_search(&upper.as_str()).is_ok();
+    found(KEYWORDS) || (dialect == Dialect::ClickHouse && found(CLICKHOUSE_KEYWORDS))
 }
 
 /// PostgreSQL, MySQL and SQLite read every non-ASCII character, a no-break space included, as part
@@ -267,7 +382,7 @@ pub fn tokenize(src: &str, dialect: Dialect) -> Vec<Token> {
             i = block_comment_end(src, i, dialect);
             TokenKind::Comment
         } else if c == '\'' || (dialect == Dialect::MySql && c == '"') {
-            i = scan_quoted(src, i, c, dialect == Dialect::MySql);
+            i = scan_quoted(src, i, c, dialect.backslash_escapes());
             TokenKind::String
         } else if (c == 'E' || c == 'e') && dialect == Dialect::Postgres && bytes.get(i + 1) == Some(&b'\'') {
             i = scan_quoted(src, i + 1, '\'', true);
@@ -276,9 +391,9 @@ pub fn tokenize(src: &str, dialect: Dialect) -> Vec<Token> {
             i = scan_quoted(src, i + 1, '\'', false);
             TokenKind::String
         } else if c == '"' || (c == '`' && dialect != Dialect::Postgres) {
-            i = scan_quoted(src, i, c, false);
+            i = scan_quoted(src, i, c, dialect == Dialect::ClickHouse);
             TokenKind::QuotedIdent
-        } else if c == '$' && dialect == Dialect::Postgres {
+        } else if c == '$' && matches!(dialect, Dialect::Postgres | Dialect::ClickHouse) {
             if let Some(end) = scan_dollar_quoted(src, i) {
                 i = end;
                 TokenKind::String
@@ -296,7 +411,7 @@ pub fn tokenize(src: &str, dialect: Dialect) -> Vec<Token> {
             while let Some(c) = next_char(i).filter(|c| is_ident_char(*c)) {
                 i += c.len_utf8();
             }
-            if is_keyword(&src[start..i]) { TokenKind::Keyword } else { TokenKind::Ident }
+            if is_keyword(&src[start..i], dialect) { TokenKind::Keyword } else { TokenKind::Ident }
         } else if c == '?' {
             i += 1;
             TokenKind::Param
@@ -325,9 +440,10 @@ pub fn tokenize(src: &str, dialect: Dialect) -> Vec<Token> {
 }
 
 /// MySQL starts a `--` comment only before whitespace or a control character; `1 --1` is
-/// arithmetic there.
+/// arithmetic there. ClickHouse also reads `#` as a line comment.
 fn line_comment(src: &str, i: usize, dialect: Dialect) -> bool {
     match dialect {
+        Dialect::ClickHouse => src[i..].starts_with("--") || src[i..].starts_with('#'),
         Dialect::MySql => {
             src[i..].starts_with('#')
                 || (src[i..].starts_with("--")
@@ -337,14 +453,14 @@ fn line_comment(src: &str, i: usize, dialect: Dialect) -> bool {
     }
 }
 
-/// The end of the block comment that opens at `open`. PostgreSQL nests them.
+/// The end of the block comment that opens at `open`. PostgreSQL and ClickHouse nest them.
 fn block_comment_end(src: &str, open: usize, dialect: Dialect) -> usize {
     let bytes = src.as_bytes();
     let mut depth = 0usize;
     let mut i = open;
     while i + 1 < bytes.len() {
         match (bytes[i], bytes[i + 1]) {
-            (b'/', b'*') if depth == 0 || dialect == Dialect::Postgres => {
+            (b'/', b'*') if depth == 0 || matches!(dialect, Dialect::Postgres | Dialect::ClickHouse) => {
                 depth += 1;
                 i += 2;
             }
@@ -531,6 +647,27 @@ mod tests {
         let mut sorted = KEYWORDS.to_vec();
         sorted.sort_unstable();
         assert_eq!(sorted, KEYWORDS, "KEYWORDS must stay sorted for binary search");
+        let mut sorted = CLICKHOUSE_KEYWORDS.to_vec();
+        sorted.sort_unstable();
+        assert_eq!(sorted, CLICKHOUSE_KEYWORDS, "CLICKHOUSE_KEYWORDS must stay sorted for binary search");
+        assert!(CLICKHOUSE_KEYWORDS.iter().all(|k| !KEYWORDS.contains(k)), "no keyword listed twice");
+    }
+
+    #[test]
+    fn clickhouse_lexing() {
+        let ch = Dialect::ClickHouse;
+        assert_eq!(texts("select 'a\\'b;'; select 2", ch), vec!["select 'a\\'b;'", "select 2"]);
+        assert_eq!(texts("select 1 # a; b\n; select 2", ch), vec!["select 1", "select 2"]);
+        assert_eq!(texts("/* a /* b; */ c; */ select 1", ch), vec!["select 1"]);
+        assert_eq!(
+            texts("select `a\\`;b` from t; select $h$ ; $h$", ch),
+            vec!["select `a\\`;b` from t", "select $h$ ; $h$"]
+        );
+        assert!(is_keyword("prewhere", ch) && !is_keyword("prewhere", Dialect::MySql));
+        let kinds =
+            |src: &str, d| tokenize(src, d).into_iter().filter(|t| !t.is_trivia()).map(|t| t.kind).collect::<Vec<_>>();
+        assert_eq!(kinds("final", ch), vec![TokenKind::Keyword]);
+        assert_eq!(kinds("final", Dialect::Postgres), vec![TokenKind::Ident]);
     }
 
     #[test]

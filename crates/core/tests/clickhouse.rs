@@ -283,6 +283,11 @@ async fn clickhouse_cancel_and_tls() {
     driver::connect(&cfg, &password()).await.unwrap();
     cfg.tls.mode = SslMode::Require;
     assert!(driver::connect(&cfg, &password()).await.is_err(), "no TLS on the plain HTTP port");
+    let mut unicode = clickhouse_config();
+    unicode.user = "tp_unicode".into();
+    let creds = tableplus_core::Credentials { password: Some("pässwörd✓".into()), ..Default::default() };
+    let other = driver::connect(&unicode, &creds).await.unwrap();
+    assert_eq!(driver::scalar(other.as_ref(), "SELECT count() FROM users").await.unwrap().as_deref(), Some("200"));
     let wrong = tableplus_core::Credentials { password: Some("wrong".into()), ..Default::default() };
     let err = format!("{:#}", driver::connect(&clickhouse_config(), &wrong).await.err().unwrap());
     assert!(err.contains("AUTHENTICATION_FAILED") || err.contains("Authentication failed"), "{err}");

@@ -136,5 +136,9 @@ SELECT
     toDateTime('2024-01-01 00:00:00', 'UTC') + number
 FROM numbers(250000);
 
+-- A password that only reaches the server intact when it is encoded.
+CREATE USER tp_unicode IDENTIFIED BY 'pässwörd✓';
+GRANT SELECT ON shop.* TO tp_unicode;
+
 CREATE TABLE shop.seed_done (ok UInt8) ENGINE = TinyLog;
 INSERT INTO shop.seed_done VALUES (1);

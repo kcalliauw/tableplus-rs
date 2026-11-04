@@ -51,7 +51,7 @@ async fn clickhouse_metadata() {
     assert_eq!(col("discount").data_type, "Nullable(Float64)");
     assert!(col("discount").nullable && col("note").nullable && !col("total").nullable);
     assert_eq!(orders.primary_key(), vec!["user_id", "created_at"]);
-    assert_eq!(orders.sorting_key, vec!["user_id", "created_at", "id"]);
+    assert_eq!(orders.sorting_key, vec!["user_id", "created_at", "id", "_part", "_part_offset"]);
     assert_eq!(orders.paging_key(), orders.sorting_key);
     let skip = orders.indexes.iter().find(|i| i.name == "idx_status").unwrap();
     assert_eq!(skip.definition.as_deref(), Some("INDEX `idx_status` status TYPE set(8) GRANULARITY 4"));
@@ -288,6 +288,13 @@ async fn clickhouse_cancel_and_tls() {
     let creds = tableplus_core::Credentials { password: Some("pässwörd✓".into()), ..Default::default() };
     let other = driver::connect(&unicode, &creds).await.unwrap();
     assert_eq!(driver::scalar(other.as_ref(), "SELECT count() FROM users").await.unwrap().as_deref(), Some("200"));
+    // A user with SELECT alone can't kill queries or read skip indexes.
+    match other.query("SELECT number FROM numbers(3)", Some(2)).await.unwrap() {
+        StatementResult::Rows(rs) => assert!(rs.rows.len() == 2 && rs.truncated),
+        r => panic!("{r:?}"),
+    }
+    assert_eq!(driver::scalar(other.as_ref(), "SELECT 1").await.unwrap().as_deref(), Some("1"));
+    assert!(!other.table_structure("shop", "orders").await.unwrap().columns.is_empty());
     let wrong = tableplus_core::Credentials { password: Some("wrong".into()), ..Default::default() };
     let err = format!("{:#}", driver::connect(&clickhouse_config(), &wrong).await.err().unwrap());
     assert!(err.contains("AUTHENTICATION_FAILED") || err.contains("Authentication failed"), "{err}");
@@ -374,4 +381,31 @@ async fn clickhouse_explain_text() {
     let typed = rows(&conn, "EXPLAIN SYNTAX SELECT 1").await;
     assert!(!typed.rows.is_empty());
     assert!(!plan::asks_for_plan(&server, "DESCRIBE TABLE orders"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clickhouse_pages_dont_overlap_on_a_shared_sorting_key() {
+    let Some(conn) = connect().await else {
+        return;
+    };
+    let table = "shop.paging_dupes";
+    conn.query(&format!("DROP TABLE IF EXISTS {table}"), None).await.unwrap();
+    conn.query(&format!("CREATE TABLE {table} (k UInt8, id UInt32) ENGINE = MergeTree ORDER BY k"), None)
+        .await
+        .unwrap();
+    for part in 0..4 {
+        let sql = format!("INSERT INTO {table} SELECT number % 3, number + {} FROM numbers(2000)", part * 2000);
+        conn.query(&sql, None).await.unwrap();
+    }
+    let st = conn.table_structure("shop", "paging_dupes").await.unwrap();
+    let sort = sqlgen::with_tiebreaker(&[SortKey { column: "k".into(), descending: true }], &st.paging_key());
+    let mut seen = std::collections::HashSet::new();
+    for offset in (0..8000).step_by(1000) {
+        let sql = sqlgen::select_page_sql(conn.dialect(), "shop", "paging_dupes", None, &sort, Some(1000), offset);
+        for row in rows(&conn, &sql).await.rows {
+            assert!(seen.insert(row[1].to_text()), "row {:?} on two pages", row[1]);
+        }
+    }
+    assert_eq!(seen.len(), 8000);
+    conn.query(&format!("DROP TABLE {table}"), None).await.unwrap();
 }

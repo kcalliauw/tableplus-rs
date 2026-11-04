@@ -37,6 +37,8 @@ const SYSTEM_DATABASES: &str = "('system', 'INFORMATION_SCHEMA', 'information_sc
 const SESSION_TIMEOUT_SECS: &str = "3600";
 /// `SESSION_IS_LOCKED`: the session still runs a statement whose reader went away.
 const SESSION_IS_LOCKED: &str = "373";
+/// `SESSION_NOT_FOUND`: the server ended the session after it sat idle too long.
+const SESSION_NOT_FOUND: &str = "372";
 const ROWS_PER_BATCH: usize = 1024;
 
 pub struct ChConnection {
@@ -44,13 +46,26 @@ pub struct ChConnection {
     url: Url,
     user: String,
     password: String,
-    session_id: String,
-    turn: Mutex<()>,
+    turn: Mutex<SessionState>,
     /// The `query_id` of the statement the session is running, for [`Connection::cancel`].
     running: std::sync::Mutex<Option<String>>,
     version: String,
     database: String,
     _tunnel: Option<SshTunnel>,
+}
+
+/// The HTTP session the connection's statements share.
+struct SessionState {
+    id: String,
+    /// Whether the server has created it. From then on requests ask the server to refuse an
+    /// unknown id instead of silently starting a fresh session in the default database.
+    started: bool,
+}
+
+impl SessionState {
+    fn new() -> Self {
+        Self { id: Uuid::new_v4().to_string(), started: false }
+    }
 }
 
 /// What a statement returned.
@@ -210,8 +225,7 @@ impl ChConnection {
             url,
             user: config.user.clone(),
             password: creds.password.clone().unwrap_or_default(),
-            session_id: Uuid::new_v4().to_string(),
-            turn: Mutex::new(()),
+            turn: Mutex::new(SessionState::new()),
             running: std::sync::Mutex::new(None),
             version: String::new(),
             database: String::new(),
@@ -236,16 +250,21 @@ impl ChConnection {
     }
 
     async fn session(&self) -> Session<'_> {
-        Session { conn: self, _turn: self.turn.lock().await }
+        Session { conn: self, state: self.turn.lock().await }
     }
 
-    fn post(&self, sql: &str, query_id: &str, in_session: bool) -> reqwest::RequestBuilder {
+    fn post(&self, sql: &str, query_id: &str, session: Option<&SessionState>) -> reqwest::RequestBuilder {
         let mut url = self.url.clone();
         {
             let mut q = url.query_pairs_mut();
-            q.append_pair("query_id", query_id).append_pair("default_format", FORMAT);
-            if in_session {
-                q.append_pair("session_id", &self.session_id).append_pair("session_timeout", SESSION_TIMEOUT_SECS);
+            q.append_pair("query_id", query_id)
+                .append_pair("default_format", FORMAT)
+                .append_pair("cancel_http_readonly_queries_on_client_close", "1");
+            if let Some(session) = session {
+                q.append_pair("session_id", &session.id).append_pair("session_timeout", SESSION_TIMEOUT_SECS);
+                if session.started {
+                    q.append_pair("session_check", "1");
+                }
             }
         }
         self.http
@@ -259,7 +278,7 @@ impl ChConnection {
     async fn kill(&self, query_id: &str, wait: bool) -> Result<()> {
         let mode = if wait { "SYNC" } else { "ASYNC" };
         let sql = format!("KILL QUERY WHERE query_id = {} {mode}", D.quote_str(query_id));
-        let response = self.post(&sql, &Uuid::new_v4().to_string(), false).send().await?;
+        let response = self.post(&sql, &Uuid::new_v4().to_string(), None).send().await?;
         checked(response).await?.bytes().await?;
         Ok(())
     }
@@ -285,24 +304,22 @@ async fn checked(response: Response) -> Result<Response> {
 /// The connection's turn at its HTTP session.
 struct Session<'c> {
     conn: &'c ChConnection,
-    _turn: MutexGuard<'c, ()>,
+    state: MutexGuard<'c, SessionState>,
 }
 
 impl Session<'_> {
     /// Runs `sql`, handing its rows to `sink` in batches of up to `batch`. The sink always hears
     /// of the columns, with an empty batch when there are no rows. When the sink stops or fails,
-    /// the statement is killed so the session is free for the next one.
+    /// the statement is killed so the session is free for the next one. A user without the right
+    /// to kill it still gets its rows; the server then stops it when the connection closes.
     async fn run(&mut self, sql: &str, batch: usize, sink: &mut RowSink<'_>) -> Result<Output> {
         let query_id = Uuid::new_v4().to_string();
         *self.conn.running.lock().unwrap_or_else(|e| e.into_inner()) = Some(query_id.clone());
         let mut finished = false;
         let outcome = self.stream(sql, &query_id, batch, sink, &mut finished).await;
         *self.conn.running.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        if !finished {
-            let killed = self.conn.kill(&query_id, true).await;
-            if outcome.is_ok() {
-                killed?;
-            }
+        if !finished && let Err(e) = self.conn.kill(&query_id, true).await {
+            tracing::debug!("could not kill ClickHouse query {query_id}: {e:#}");
         }
         outcome
     }
@@ -364,17 +381,40 @@ impl Session<'_> {
         Ok(Output::Rows)
     }
 
-    /// Sends `sql`, waiting out a statement the session still runs after its reader went away.
-    async fn send(&self, sql: &str, query_id: &str) -> Result<Response> {
+    /// Sends `sql`, waiting out a statement the session still runs after its reader went away,
+    /// and starting a new session when the server ended the idle one.
+    async fn send(&mut self, sql: &str, query_id: &str) -> Result<Response> {
+        let mut renewed = false;
         for _ in 0..30 {
-            let response = self.conn.post(sql, query_id, true).send().await?;
-            let locked = response.headers().get("X-ClickHouse-Exception-Code").is_some_and(|c| c == SESSION_IS_LOCKED);
-            if !locked {
-                return checked(response).await;
+            let response = self.conn.post(sql, query_id, Some(&self.state)).send().await?;
+            let code = response.headers().get("X-ClickHouse-Exception-Code").and_then(|c| c.to_str().ok());
+            match code {
+                Some(SESSION_IS_LOCKED) => tokio::time::sleep(Duration::from_millis(100)).await,
+                Some(SESSION_NOT_FOUND) if !renewed => {
+                    renewed = true;
+                    self.renew().await?;
+                }
+                _ => {
+                    self.state.started = true;
+                    return checked(response).await;
+                }
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
         }
         bail!("The session is still busy with an earlier statement. Try again in a moment.")
+    }
+
+    /// Starts a new session in the connection's database. Settings and temporary tables of the
+    /// old session are gone.
+    async fn renew(&mut self) -> Result<()> {
+        tracing::info!("the ClickHouse session expired; starting a new one");
+        *self.state = SessionState::new();
+        if !self.conn.database.is_empty() {
+            let sql = format!("USE {}", D.quote_ident(&self.conn.database));
+            let response = self.conn.post(&sql, &Uuid::new_v4().to_string(), Some(&self.state)).send().await?;
+            checked(response).await?.bytes().await?;
+        }
+        self.state.started = true;
+        Ok(())
     }
 
     async fn query(&mut self, sql: &str, max_rows: Option<usize>) -> Result<StatementResult> {
@@ -531,12 +571,17 @@ impl Connection for ChConnection {
                 definition: Some(format!("ORDER BY ({sorting_key})")),
             });
         }
+        // Reading skip indexes needs a grant on the system table that SELECT on the table lacks.
         let skipping = self
             .meta(&format!(
                 "SELECT name, expr, type_full, granularity FROM system.data_skipping_indices \
                  WHERE database = {sq} AND table = {tq} ORDER BY name"
             ))
-            .await?;
+            .await
+            .unwrap_or_else(|e| {
+                tracing::debug!("skip indexes of {schema}.{table} unavailable: {e:#}");
+                Vec::new()
+            });
         for r in skipping {
             let (name, expr, kind) = (s(&r[0]), s(&r[1]), s(&r[2]));
             indexes.push(IndexInfo {
@@ -548,8 +593,13 @@ impl Connection for ChConnection {
                 method: Some(kind),
             });
         }
+        let mut paging = key_columns(&sorting_key, &columns);
+        // A sorting key needn't be unique; a MergeTree row's part and offset are.
+        if engine.ends_with("MergeTree") {
+            paging.extend(["_part".to_string(), "_part_offset".to_string()]);
+        }
         Ok(TableStructure {
-            sorting_key: key_columns(&sorting_key, &columns),
+            sorting_key: paging,
             columns,
             indexes,
             constraints: Vec::new(),

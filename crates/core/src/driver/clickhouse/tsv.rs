@@ -190,6 +190,9 @@ impl TsvReader {
                 }
                 self.kinds = self.columns.iter().map(|c| ValueKind::of(&c.type_name)).collect();
             }
+            // WITH TOTALS and extremes put an empty line before their rows; a row of several
+            // columns always has tabs.
+            _ if line.is_empty() && self.kinds.len() > 1 => {}
             _ => {
                 if fields.len() != self.kinds.len() {
                     return false;
@@ -324,5 +327,13 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(reader.finish().unwrap_err(), "Code: 241. DB::Exception: Memory limit exceeded");
         assert!(read(&[b"a\nUInt8\n1\n2"]).0.finish().is_err(), "a body cut inside a line");
+    }
+
+    #[test]
+    fn totals_follow_an_empty_line() {
+        let (reader, rows) = read(&[b"k\tn\nString\tUInt64\na\t1\nb\t2\n\n\t3\n"]);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[2][..], [Value::text(""), Value::UInt(3)]);
+        reader.finish().unwrap();
     }
 }

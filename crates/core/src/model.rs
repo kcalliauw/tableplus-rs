@@ -122,8 +122,9 @@ pub struct TableStructure {
     pub indexes: Vec<IndexInfo>,
     pub constraints: Vec<ConstraintInfo>,
     pub comment: Option<String>,
-    /// ClickHouse: the columns its sorting key names, in key order. Rows are stored in this order,
-    /// so paging by it reads the least. Empty elsewhere.
+    /// ClickHouse: the columns its sorting key names, in key order, then for MergeTree tables the
+    /// `_part` and `_part_offset` virtual columns, which together name one stored row. Rows are
+    /// stored in this order, so paging by it reads the least. Empty elsewhere.
     pub sorting_key: Vec<String>,
 }
 

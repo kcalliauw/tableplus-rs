@@ -84,7 +84,7 @@ services:
       retries: 60
 
   # Bastion host for SSH-tunnel tests: user "tunnel" / password "tunnel_pass",
-  # plus key auth with docker/sshd/test_key. It can reach "postgres" and "mysql" by name.
+  # plus key auth with docker/sshd/test_key. It can reach "postgres", "mysql" and "clickhouse" by name.
   sshd:
     build: ./sshd
     ports:

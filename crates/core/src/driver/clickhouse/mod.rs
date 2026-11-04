@@ -257,9 +257,7 @@ impl ChConnection {
         let mut url = self.url.clone();
         {
             let mut q = url.query_pairs_mut();
-            q.append_pair("query_id", query_id)
-                .append_pair("default_format", FORMAT)
-                .append_pair("cancel_http_readonly_queries_on_client_close", "1");
+            q.append_pair("query_id", query_id).append_pair("default_format", FORMAT);
             if let Some(session) = session {
                 q.append_pair("session_id", &session.id).append_pair("session_timeout", SESSION_TIMEOUT_SECS);
                 if session.started {
@@ -311,7 +309,8 @@ impl Session<'_> {
     /// Runs `sql`, handing its rows to `sink` in batches of up to `batch`. The sink always hears
     /// of the columns, with an empty batch when there are no rows. When the sink stops or fails,
     /// the statement is killed so the session is free for the next one. A user without the right
-    /// to kill it still gets its rows; the server then stops it when the connection closes.
+    /// to kill it still gets its rows; the server stops it once it can't write to the closed
+    /// connection.
     async fn run(&mut self, sql: &str, batch: usize, sink: &mut RowSink<'_>) -> Result<Output> {
         let query_id = Uuid::new_v4().to_string();
         *self.conn.running.lock().unwrap_or_else(|e| e.into_inner()) = Some(query_id.clone());

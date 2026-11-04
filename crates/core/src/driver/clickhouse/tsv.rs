@@ -190,9 +190,9 @@ impl TsvReader {
                 }
                 self.kinds = self.columns.iter().map(|c| ValueKind::of(&c.type_name)).collect();
             }
-            // WITH TOTALS and extremes put an empty line before their rows; a row of several
-            // columns always has tabs.
-            _ if line.is_empty() && self.kinds.len() > 1 => {}
+            // WITH TOTALS and extremes put an empty line before their rows. A row of several
+            // columns always has tabs, and only text can be empty.
+            _ if line.is_empty() && self.kinds != [ValueKind::Text] => {}
             _ => {
                 if fields.len() != self.kinds.len() {
                     return false;
@@ -335,5 +335,9 @@ mod tests {
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[2][..], [Value::text(""), Value::UInt(3)]);
         reader.finish().unwrap();
+        let (_, rows) = read(&[b"n\nUInt64\n1\n1\n\n2\n"]);
+        assert_eq!(rows.len(), 3);
+        let (_, rows) = read(&[b"s\nString\na\n\n"]);
+        assert_eq!(rows.len(), 2, "an empty string is a row");
     }
 }

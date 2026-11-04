@@ -295,6 +295,8 @@ async fn clickhouse_cancel_and_tls() {
     }
     assert_eq!(driver::scalar(other.as_ref(), "SELECT 1").await.unwrap().as_deref(), Some("1"));
     assert!(!other.table_structure("shop", "orders").await.unwrap().columns.is_empty());
+    other.query("SET readonly = 1", None).await.unwrap();
+    assert_eq!(driver::scalar(other.as_ref(), "SELECT 1").await.unwrap().as_deref(), Some("1"), "read-only session");
     let wrong = tableplus_core::Credentials { password: Some("wrong".into()), ..Default::default() };
     let err = format!("{:#}", driver::connect(&clickhouse_config(), &wrong).await.err().unwrap());
     assert!(err.contains("AUTHENTICATION_FAILED") || err.contains("Authentication failed"), "{err}");

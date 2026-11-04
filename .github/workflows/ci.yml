@@ -33,7 +33,9 @@ jobs:
 
   macos:
     name: macOS · build + unit tests
-    runs-on: macos-latest
+    # The self-hosted Mac mini only builds branches of this repo, never pull requests from forks.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, macOS, ARM64, tableplus]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

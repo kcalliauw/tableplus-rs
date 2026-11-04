@@ -126,15 +126,17 @@ impl ConnDialog {
                         p.content_bg
                     };
                     ui.painter().rect(rect, CornerRadius::same(8), fill, stroke, StrokeKind::Inside);
-                    let badge = egui::Rect::from_min_size(rect.min + vec2(8.0, 12.0), vec2(24.0, 24.0));
-                    driver_badge(ui, badge, d);
-                    ui.painter().text(
-                        egui::pos2(badge.right() + 7.0, rect.center().y),
-                        egui::Align2::LEFT_CENTER,
-                        d.label(),
-                        theme::ui_font(12.0),
-                        p.text,
+                    // Badge and label are centred together so long names keep a margin.
+                    let label = ui.painter().layout_no_wrap(d.label().to_string(), theme::ui_font(12.0), p.text);
+                    let (badge_size, gap) = (22.0, 6.0);
+                    let left = (rect.center().x - (badge_size + gap + label.size().x) / 2.0).max(rect.left() + 6.0);
+                    let badge = egui::Rect::from_min_size(
+                        egui::pos2(left, rect.center().y - badge_size / 2.0),
+                        vec2(badge_size, badge_size),
                     );
+                    driver_badge(ui, badge, d);
+                    let text_pos = egui::pos2(badge.right() + gap, rect.center().y - label.size().y / 2.0);
+                    ui.painter().galley(text_pos, label, p.text);
                     if resp.clicked() {
                         self.set_driver(d);
                     }

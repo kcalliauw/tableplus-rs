@@ -58,7 +58,22 @@ pub static DUCKDB: HelperEngine = HelperEngine {
     env_var: "TABLEPLUS_DUCKDB_HELPER",
     version: "1.5.6",
     size_label: "36 MB",
-    releases: &[],
+    releases: &[
+        HelperRelease {
+            platform: "linux-x86_64",
+            url: "https://github.com/kcalliauw/tableplus-rs/releases/download/duckdb-helper-1.5.6-1/tableplus-duckdb-1.5.6-linux-x86_64.gz",
+            download_size: 15199501,
+            size: 41922792,
+            sha256: "a78292de1f3a1a9e026eeebacfa9e64cd0e386843a8d6c4195e7c3e03e458f31",
+        },
+        HelperRelease {
+            platform: "macos-aarch64",
+            url: "https://github.com/kcalliauw/tableplus-rs/releases/download/duckdb-helper-1.5.6-1/tableplus-duckdb-1.5.6-macos-aarch64.gz",
+            download_size: 11968958,
+            size: 35747552,
+            sha256: "d8359ebfa4c994e6bf019079d4d1b3f0bfc6b44ac6b6a68e3719867312d44122",
+        },
+    ],
     shared_file: duckdb_shared_file,
 };
 

@@ -5,3 +5,4 @@
 /dist
 /testdata/*.duckdb
 /testdata/*.duckdb.wal
+/testdata/*.parquet

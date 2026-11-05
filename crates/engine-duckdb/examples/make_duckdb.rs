@@ -1,5 +1,5 @@
 //! Creates the DuckDB demo and test database from `docker/seed/duckdb.sql`, through the same
-//! driver the helper serves.
+//! driver the helper serves, and `orders.parquet` beside it for opening a data file directly.
 //!
 //! cargo run -p engine-duckdb --example make_duckdb -- testdata/shop.duckdb
 
@@ -26,8 +26,11 @@ async fn main() -> anyhow::Result<()> {
     let conn = engine.open_session(&config)?;
     let script = include_str!("../../../docker/seed/duckdb.sql");
     conn.execute_in_transaction(&sql_script_statements(script, Dialect::DuckDb)).await?;
+    let parquet = path.with_file_name("orders.parquet");
+    let target = Dialect::DuckDb.quote_str(&parquet.to_string_lossy());
+    conn.query(&format!("COPY orders TO {target} (FORMAT parquet)"), None).await?;
     let StatementResult::Rows(rs) = conn.query("SELECT count(*) FROM users", None).await? else { unreachable!() };
     let users = rs.rows[0].first().cloned().unwrap_or(Value::Null);
-    println!("created {} ({} users)", path.display(), users.display());
+    println!("created {} ({} users) and {}", path.display(), users.display(), parquet.display());
     Ok(())
 }

@@ -116,12 +116,7 @@ pub fn collect(conn: &Conn, sql: &str, max_rows: Option<usize>) -> Result<Statem
 pub type Emit<'a> = dyn FnMut(&[ColumnMeta], Vec<Row>) -> Result<bool> + 'a;
 
 /// Runs `sql` and hands the last statement's rows to `emit` in batches of `batch`.
-pub fn batches(
-    conn: &Conn,
-    sql: &str,
-    batch: usize,
-    emit: &mut Emit<'_>,
-) -> Result<u64> {
+pub fn batches(conn: &Conn, sql: &str, batch: usize, emit: &mut Emit<'_>) -> Result<u64> {
     let batch = batch.max(1);
     with_last(conn, sql, |outcome| {
         let Outcome::Rows(columns, mut rows) = outcome else { return Ok(0) };

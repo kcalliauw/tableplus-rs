@@ -10,6 +10,11 @@ SQLITE="$ROOT/testdata/shop.sqlite"
 if [ ! -f "$SQLITE" ]; then
   cargo run -q --release -p tableplus-core --example make_sqlite -- "$SQLITE"
 fi
+DUCKDB="$ROOT/testdata/shop.duckdb"
+PARQUET="$ROOT/testdata/orders.parquet"
+if [ ! -f "$DUCKDB" ] || [ ! -f "$PARQUET" ]; then
+  cargo run -q --release -p engine-duckdb --example make_duckdb -- "$DUCKDB"
+fi
 KEY="$ROOT/docker/sshd/test_key"
 cat > "$HOME_DIR/connections.json" <<JSON
 {
@@ -31,7 +36,11 @@ cat > "$HOME_DIR/connections.json" <<JSON
       "ssh": { "enabled": true, "host": "127.0.0.1", "port": 22229, "user": "tunnel", "auth": "PrivateKey", "key_path": "$KEY" } },
     { "id": "00000000-0000-4000-8000-000000000006", "name": "Events (ClickHouse)", "driver": "ClickHouse", "color": "Yellow",
       "env": "Testing", "host": "127.0.0.1", "port": 18123, "user": "tp", "database": "shop",
-      "save_password": true, "tls": { "mode": "Disable" } }
+      "save_password": true, "tls": { "mode": "Disable" } },
+    { "id": "00000000-0000-4000-8000-000000000007", "name": "Shop data (DuckDB)", "driver": "DuckDb", "color": "Gray",
+      "env": "Local", "path": "$DUCKDB", "save_password": false },
+    { "id": "00000000-0000-4000-8000-000000000008", "name": "Shop orders (Parquet)", "driver": "DuckDb", "color": "Gray",
+      "env": "Local", "path": "$PARQUET", "save_password": false }
   ]
 }
 JSON

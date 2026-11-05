@@ -98,8 +98,13 @@ pub fn alter_statements(
     if let Some(why) = dialect.read_only_reason() {
         return Err(why.into());
     }
-    if dialect == Dialect::Sqlite && needs_sqlite_rebuild(current, changes) {
-        return sqlite_rebuild(schema, table, current, changes);
+    let rebuild_needed = match dialect {
+        Dialect::Sqlite => needs_sqlite_rebuild(current, changes),
+        Dialect::DuckDb => needs_duckdb_rebuild(current, changes),
+        _ => false,
+    };
+    if rebuild_needed {
+        return rebuild(dialect, schema, table, current, changes);
     }
     let t = dialect.qualified(schema, table);
     let q = |s: &str| dialect.quote_ident(s);
@@ -111,7 +116,7 @@ pub fn alter_statements(
                     return Err("New columns need a name and a type".into());
                 }
                 out.push(format!("ALTER TABLE {t} ADD COLUMN {}", column_sql(dialect, c, true)));
-                if dialect == Dialect::Postgres
+                if matches!(dialect, Dialect::Postgres | Dialect::DuckDb)
                     && let Some(cm) = c.comment.as_deref().filter(|c| !c.is_empty())
                 {
                     out.push(format!("COMMENT ON COLUMN {t}.{} IS {}", q(&c.name), dialect.quote_str(cm)));
@@ -216,6 +221,19 @@ fn modify_column(dialect: Dialect, t: &str, orig: &ColumnInfo, new: &ColumnDef, 
     }
 }
 
+/// DuckDB refuses to rename, drop, retype or change the nullability of a column while the table
+/// has any index (`Dependency Error`, DuckDB 1.5.6); defaults and comments change in place.
+fn needs_duckdb_rebuild(current: &TableStructure, changes: &[StructureChange]) -> bool {
+    !current.indexes.is_empty()
+        && changes.iter().any(|c| match c {
+            StructureChange::DropColumn(_) => true,
+            StructureChange::ModifyColumn { original, new } => current.column(original).is_some_and(|o| {
+                o.name != new.name || o.data_type.trim() != new.data_type.trim() || o.nullable != new.nullable
+            }),
+            _ => false,
+        })
+}
+
 fn needs_sqlite_rebuild(current: &TableStructure, changes: &[StructureChange]) -> bool {
     changes.iter().any(|c| match c {
         StructureChange::ModifyColumn { original, new } => match current.column(original) {
@@ -232,15 +250,17 @@ fn needs_sqlite_rebuild(current: &TableStructure, changes: &[StructureChange]) -
     })
 }
 
-/// SQLite can't alter column types/nullability in place, so the table is rebuilt:
-/// create a copy with the new definition, copy the data, swap, and recreate indexes.
-fn sqlite_rebuild(
+/// SQLite can't alter column types or nullability in place, and DuckDB can't while the table has
+/// an index, so the table is rebuilt: create a copy with the new definition, copy the data, swap,
+/// and recreate indexes. A table that another table references can't be dropped, so its rebuild
+/// fails and rolls back.
+fn rebuild(
+    d: Dialect,
     schema: &str,
     table: &str,
     current: &TableStructure,
     changes: &[StructureChange],
 ) -> Result<Vec<String>, String> {
-    let d = Dialect::Sqlite;
     // (new definition, source column name in the old table)
     let mut cols: Vec<(ColumnDef, Option<String>)> =
         current.columns.iter().map(|c| (ColumnDef::from(c), Some(c.name.clone()))).collect();
@@ -263,18 +283,28 @@ fn sqlite_rebuild(
         cols.iter().filter_map(|(c, src)| src.as_ref().map(|s| (s.clone(), c.name.clone()))).collect();
     let rename = |old: &str| renames.iter().find(|(o, _)| o == old).map(|(_, n)| n.clone()).unwrap_or(old.into());
 
-    let fks: Vec<String> = current
+    let surviving: Vec<String> = cols.iter().map(|(c, _)| c.name.clone()).collect();
+    let kept = |columns: &[String]| columns.iter().all(|c| surviving.contains(&rename(c)));
+    let quoted =
+        |columns: &[String]| columns.iter().map(|col| d.quote_ident(&rename(col))).collect::<Vec<_>>().join(", ");
+    let mut table_constraints: Vec<String> = current
         .constraints
         .iter()
-        .filter(|c| c.kind == ConstraintKind::ForeignKey)
-        .map(|c| {
-            let cols = c.columns.iter().map(|col| d.quote_ident(&rename(col))).collect::<Vec<_>>().join(", ");
-            format!("FOREIGN KEY ({cols}) {}", c.definition)
-        })
+        .filter(|c| c.kind == ConstraintKind::ForeignKey && kept(&c.columns))
+        .map(|c| format!("FOREIGN KEY ({}) {}", quoted(&c.columns), c.definition))
         .collect();
+    // SQLite keeps UNIQUE as an index and CHECK in the table text it rebuilds from; DuckDB lists
+    // both as constraints only.
+    if d == Dialect::DuckDb {
+        table_constraints.extend(current.constraints.iter().filter_map(|c| match c.kind {
+            ConstraintKind::Unique if kept(&c.columns) => Some(format!("UNIQUE ({})", quoted(&c.columns))),
+            ConstraintKind::Check => Some(c.definition.clone()),
+            _ => None,
+        }));
+    }
     let tmp = format!("_tableplus_rebuild_{table}");
     let defs: Vec<ColumnDef> = cols.iter().map(|(c, _)| c.clone()).collect();
-    let mut out = vec![create_table_sql(d, schema, &tmp, &defs, &fks)];
+    let mut out = vec![create_table_sql(d, schema, &tmp, &defs, &table_constraints)];
     let copied: Vec<&(ColumnDef, Option<String>)> = cols.iter().filter(|(_, src)| src.is_some()).collect();
     if !copied.is_empty() {
         let dst = copied.iter().map(|(c, _)| d.quote_ident(&c.name)).collect::<Vec<_>>().join(", ");
@@ -295,7 +325,6 @@ fn sqlite_rebuild(
             _ => None,
         })
         .collect();
-    let surviving: Vec<String> = cols.iter().map(|(c, _)| c.name.clone()).collect();
     for idx in &current.indexes {
         if idx.primary || dropped.contains(&idx.name.as_str()) {
             continue;
@@ -307,11 +336,22 @@ fn sqlite_rebuild(
         if idx.definition.is_some() {
             let cols = new_cols.iter().map(|c| d.quote_ident(c)).collect::<Vec<_>>().join(", ");
             let unique = if idx.unique { "UNIQUE " } else { "" };
-            out.push(format!(
-                "CREATE {unique}INDEX {} ON {} ({cols})",
-                d.qualified(schema, &idx.name),
-                d.quote_ident(table)
-            ));
+            let (name, on) = match d {
+                Dialect::Sqlite => (d.qualified(schema, &idx.name), d.quote_ident(table)),
+                _ => (d.quote_ident(&idx.name), d.qualified(schema, table)),
+            };
+            out.push(format!("CREATE {unique}INDEX {name} ON {on} ({cols})"));
+        }
+    }
+    if d == Dialect::DuckDb {
+        let t = d.qualified(schema, table);
+        if let Some(comment) = current.comment.as_deref().filter(|c| !c.is_empty()) {
+            out.push(format!("COMMENT ON TABLE {t} IS {}", d.quote_str(comment)));
+        }
+        for (c, _) in &cols {
+            if let Some(comment) = c.comment.as_deref().filter(|c| !c.is_empty()) {
+                out.push(format!("COMMENT ON COLUMN {t}.{} IS {}", d.quote_ident(&c.name), d.quote_str(comment)));
+            }
         }
     }
     let rest: Vec<StructureChange> =
@@ -468,5 +508,25 @@ mod tests {
             create_table_sql(Dialect::Postgres, "public", "t", &cols, &[]),
             "CREATE TABLE \"public\".\"t\" (\n  \"id\" bigint NOT NULL,\n  \"note\" text,\n  PRIMARY KEY (\"id\")\n)"
         );
+    }
+
+    #[test]
+    fn duckdb_rebuilds_only_tables_with_an_index() {
+        let d = Dialect::DuckDb;
+        let rename = modified(|c| c.name = "region".into());
+        let mut plain = users();
+        plain.indexes.clear();
+        let in_place = alter_statements(d, "main", "users", &plain, std::slice::from_ref(&rename)).unwrap();
+        assert_eq!(in_place, ["ALTER TABLE \"main\".\"users\" RENAME COLUMN \"country\" TO \"region\""]);
+
+        let rebuilt = alter_statements(d, "main", "users", &users(), &[rename]).unwrap();
+        assert!(rebuilt[0].starts_with("CREATE TABLE \"main\".\"_tableplus_rebuild_users\""), "{rebuilt:#?}");
+        assert!(rebuilt[0].contains("FOREIGN KEY (\"region\") REFERENCES \"countries\" (\"code\")"));
+        assert!(rebuilt.contains(&"DROP TABLE \"main\".\"users\"".to_string()));
+        assert!(rebuilt.contains(&"CREATE INDEX \"users_country_idx\" ON \"main\".\"users\" (\"region\")".to_string()));
+
+        let default = modified(|c| c.default = Some("'x'".into()));
+        let in_place = alter_statements(d, "main", "users", &users(), &[default]).unwrap();
+        assert_eq!(in_place, ["ALTER TABLE \"main\".\"users\" ALTER COLUMN \"country\" SET DEFAULT 'x'"]);
     }
 }

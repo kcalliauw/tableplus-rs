@@ -534,7 +534,7 @@ impl StructureEditor {
                                 });
                                 cell(ui, &c.columns.join(", "), 200.0, true);
                                 cell(ui, &c.definition, 470.0, true);
-                                if editable && dialect != Dialect::Sqlite {
+                                if editable && dialect.drops_constraints() {
                                     let icon = if dropped { Icon::Refresh } else { Icon::Trash };
                                     if widgets::icon_button_sized(
                                         ui,

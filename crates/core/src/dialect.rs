@@ -131,6 +131,12 @@ impl Dialect {
         }
     }
 
+    /// Whether `ALTER TABLE … DROP CONSTRAINT` (or MySQL's equivalents) works. SQLite has no such
+    /// statement, and DuckDB 1.5.6 answers "No support for that ALTER TABLE option yet".
+    pub fn drops_constraints(self) -> bool {
+        !matches!(self, Dialect::Sqlite | Dialect::DuckDb)
+    }
+
     /// Frequently used column types offered in the structure editor.
     pub fn common_types(self) -> &'static [&'static str] {
         match self {

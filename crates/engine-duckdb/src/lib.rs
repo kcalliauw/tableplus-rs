@@ -216,7 +216,15 @@ impl Connection for DuckConnection {
                     Ok(StatementResult::Rows(_)) => {}
                     Err(e) => {
                         let _ = c.execute("ROLLBACK");
-                        return Err(e.context(format!("statement {} failed: {stmt}", i + 1)));
+                        let e = e.context(format!("statement {} failed: {stmt}", i + 1));
+                        return Err(if is_rebuild_drop(stmt, &e) {
+                            e.context(
+                                "DuckDB can't change this column while the table has an index, so the table is \
+                                 rebuilt, and DuckDB won't drop a table that another table's foreign key references",
+                            )
+                        } else {
+                            e
+                        });
                     }
                 }
             }
@@ -240,6 +248,11 @@ impl Connection for DuckConnection {
     async fn ping(&self) -> Result<()> {
         self.with_conn(|c| c.execute("SELECT 1")).await
     }
+}
+
+/// The structure editor's table rebuild (`tableplus_core::alter`) failed at dropping the old table.
+fn is_rebuild_drop(stmt: &str, e: &anyhow::Error) -> bool {
+    stmt.starts_with("DROP TABLE") && format!("{e:#}").contains("is main key table of")
 }
 
 fn explain(c: &Conn, req: &ExplainStatements) -> Result<Explained> {

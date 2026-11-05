@@ -330,3 +330,162 @@ async fn duckdb_missing_helper_says_so() {
         tableplus_core::driver::remote::RemoteConnection::open(engine, &cfg).await.err().expect("no helper there");
     assert!(format!("{err:#}").contains("tableplus-duckdb-does-not-exist"), "{err:#}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn duckdb_editing() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = duckdb_fixture(dir.path()).await;
+    let conn = connect(&cfg).await;
+    exercise_editing(&conn, "main").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn duckdb_edits_duckdb_values() {
+    use tableplus_core::alter::{ColumnDef, StructureChange, alter_statements};
+    use tableplus_core::sqlgen::{CellEdit, RowIdentity};
+    const D: Dialect = Dialect::DuckDb;
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = duckdb_fixture(dir.path()).await;
+    let conn = connect(&cfg).await;
+    let affected = |r: StatementResult| match r {
+        StatementResult::Affected(n) => n,
+        StatementResult::Rows(rs) => panic!("expected a count, got {:?}", rs.columns),
+    };
+
+    // A row without a primary key is found through the text the grid shows, timestamps included.
+    let log = conn.table_structure("main", "audit_log").await.unwrap();
+    let first = rows(&conn, "SELECT * FROM audit_log ORDER BY happened_at LIMIT 1").await;
+    let identity = RowIdentity::new(&log.columns, &first.rows[0]);
+    let sql = sqlgen::update_sql(
+        D,
+        "main",
+        "audit_log",
+        &log.columns,
+        &identity,
+        &[("actor".into(), CellEdit::Text("koen".into()))],
+    );
+    assert_eq!(affected(conn.query(&sql, None).await.unwrap()), 1, "{sql}");
+    assert_eq!(count(&conn, "main", "audit_log", Some("actor = 'koen'")).await, 1);
+
+    // Lists, structs, maps, enums and blobs typed as text are coerced by DuckDB.
+    let zoo = conn.table_structure("main", "type_zoo").await.unwrap();
+    let one = rows(&conn, "SELECT * FROM type_zoo WHERE id = 1").await;
+    let edits = [
+        ("c_list", "[4, 5]"),
+        ("c_struct", "{'a': 7, 'b': y}"),
+        ("c_map", "{k3=3}"),
+        ("c_enum", "shipped"),
+        ("c_blob", "0xCAFE"),
+        ("c_interval", "2 days"),
+    ];
+    let changes: Vec<(String, CellEdit)> =
+        edits.iter().map(|(c, v)| (c.to_string(), CellEdit::Text(v.to_string()))).collect();
+    let sql = sqlgen::update_sql(
+        D,
+        "main",
+        "type_zoo",
+        &zoo.columns,
+        &RowIdentity::new(&zoo.columns, &one.rows[0]),
+        &changes,
+    );
+    assert_eq!(affected(conn.query(&sql, None).await.unwrap()), 1, "{sql}");
+    let back =
+        rows(&conn, "SELECT c_list, c_struct, c_map, c_enum, c_blob, c_interval FROM type_zoo WHERE id = 1").await;
+    assert_eq!(
+        back.rows[0],
+        vec![
+            Value::text("[4, 5]"),
+            Value::text("{'a': 7, 'b': y}"),
+            Value::text("{k3=3}"),
+            Value::text("shipped"),
+            Value::Bytes(vec![0xCA, 0xFE].into()),
+            Value::text("2 days"),
+        ]
+        .into()
+    );
+
+    // Renaming a column of an indexed table rebuilds it, keeping its comment, indexes and keys.
+    let products = conn.table_structure("main", "products").await.unwrap();
+    conn.query("CREATE INDEX products_name_idx ON products (name)", None).await.unwrap();
+    conn.query("COMMENT ON COLUMN products.stock IS 'units on hand'", None).await.unwrap();
+    let products = conn.table_structure("main", "products").await.map(|p| (p, products)).unwrap().0;
+    let mut renamed = ColumnDef::from(products.column("name").unwrap());
+    renamed.name = "title".into();
+    let ddl = alter_statements(
+        D,
+        "main",
+        "products",
+        &products,
+        &[StructureChange::ModifyColumn { original: "name".into(), new: renamed }],
+    )
+    .unwrap();
+    assert!(ddl[0].starts_with("CREATE TABLE \"main\".\"_tableplus_rebuild_products\""), "{ddl:#?}");
+    // products is referenced by order_items, so DuckDB refuses to drop it and nothing changes.
+    let err = format!("{:#}", conn.execute_in_transaction(&ddl).await.unwrap_err());
+    assert!(err.contains("another table's foreign key") && err.contains("order_items"), "{err}");
+    let unchanged = conn.table_structure("main", "products").await.unwrap();
+    assert!(unchanged.column("name").is_some() && unchanged.column("title").is_none(), "rolled back");
+    assert_eq!(count(&conn, "main", "products", None).await, 300);
+
+    // A table nothing references is rebuilt.
+    conn.query(
+        "CREATE TABLE notes (id INTEGER PRIMARY KEY, body VARCHAR NOT NULL UNIQUE, n INTEGER CHECK (n > 0))",
+        None,
+    )
+    .await
+    .unwrap();
+    conn.query("INSERT INTO notes VALUES (1, 'a', 1), (2, 'b', 2)", None).await.unwrap();
+    conn.query("CREATE INDEX notes_n_idx ON notes (n)", None).await.unwrap();
+    conn.query("COMMENT ON TABLE notes IS 'scratch'", None).await.unwrap();
+    let notes = conn.table_structure("main", "notes").await.unwrap();
+    let mut text = ColumnDef::from(notes.column("body").unwrap());
+    text.name = "text".into();
+    text.nullable = true;
+    let ddl = alter_statements(
+        D,
+        "main",
+        "notes",
+        &notes,
+        &[StructureChange::ModifyColumn { original: "body".into(), new: text }],
+    )
+    .unwrap();
+    conn.execute_in_transaction(&ddl).await.unwrap_or_else(|e| panic!("{ddl:#?}: {e:#}"));
+    let notes = conn.table_structure("main", "notes").await.unwrap();
+    assert!(notes.column("text").unwrap().nullable);
+    assert_eq!(notes.primary_key(), vec!["id"]);
+    assert_eq!(notes.comment.as_deref(), Some("scratch"));
+    assert!(notes.indexes.iter().any(|i| i.name == "notes_n_idx"));
+    assert!(
+        notes.constraints.iter().any(|c| c.kind == ConstraintKind::Unique && c.columns == ["text"]),
+        "{:?}",
+        notes.constraints
+    );
+    assert!(notes.constraints.iter().any(|c| c.kind == ConstraintKind::Check));
+    assert_eq!(
+        rows(&conn, "SELECT text FROM notes ORDER BY id").await.rows,
+        vec![vec![Value::text("a")].into(), vec![Value::text("b")].into()]
+    );
+
+    // Defaults and comments change in place, and constraints can't be dropped.
+    let mut default = ColumnDef::from(notes.column("n").unwrap());
+    default.default = Some("5".into());
+    default.comment = Some("count".into());
+    let ddl = alter_statements(
+        D,
+        "main",
+        "notes",
+        &notes,
+        &[StructureChange::ModifyColumn { original: "n".into(), new: default }],
+    )
+    .unwrap();
+    assert!(ddl.iter().all(|s| !s.contains("_tableplus_rebuild_")), "{ddl:#?}");
+    conn.execute_in_transaction(&ddl).await.unwrap();
+    let n = conn.table_structure("main", "notes").await.unwrap();
+    assert_eq!(
+        (n.column("n").unwrap().default.as_deref(), n.column("n").unwrap().comment.as_deref()),
+        (Some("5"), Some("count"))
+    );
+    let drop = StructureChange::DropConstraint { name: "x".into(), kind: ConstraintKind::Unique };
+    assert!(alter_statements(D, "main", "notes", &n, &[drop]).is_err());
+    assert!(!D.drops_constraints());
+}

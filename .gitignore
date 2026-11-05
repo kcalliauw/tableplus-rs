@@ -3,3 +3,5 @@
 /testdata/*.sqlite-*
 .DS_Store
 /dist
+/testdata/*.duckdb
+/testdata/*.duckdb.wal

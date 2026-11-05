@@ -1,0 +1,21 @@
+[package]
+name = "engine-duckdb"
+description = "tableplus-duckdb, the helper program that runs DuckDB for tableplus-rs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "tableplus-duckdb"
+path = "src/main.rs"
+
+[dependencies]
+tableplus-core.workspace = true
+driver-host.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+async-trait = "0.1"
+libduckdb-sys = { version = "=1.10506.1", default-features = false, features = ["bundled", "json", "parquet"] }
+
+[dev-dependencies]
+tempfile = "3"

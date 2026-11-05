@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/app", "crates/driver-host"]
+members = ["crates/core", "crates/app", "crates/driver-host", "crates/engine-duckdb"]
 # A plain `cargo build` skips the DuckDB helper, whose C++ takes over a minute to compile.
 default-members = ["crates/core", "crates/app"]
 

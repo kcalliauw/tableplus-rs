@@ -411,3 +411,22 @@ async fn clickhouse_pages_dont_overlap_on_a_shared_sorting_key() {
     assert_eq!(seen.len(), 8000);
     conn.query(&format!("DROP TABLE {table}"), None).await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clickhouse_autocomplete_knows_which_functions_ignore_case() {
+    use tableplus_core::sqltext::{function_ignores_case, functions};
+    let Some(conn) = connect().await else { return };
+    let names = functions(Dialect::ClickHouse);
+    let list = names.iter().map(|f| format!("'{f}'")).collect::<Vec<_>>().join(",");
+    let rs = rows(
+        &conn,
+        &format!("SELECT name FROM system.functions WHERE case_insensitive AND name IN ({list}) ORDER BY name"),
+    )
+    .await;
+    let mut server: Vec<String> = rs.rows.iter().map(|r| r[0].to_text().unwrap()).collect();
+    server.sort();
+    let mut ours: Vec<String> =
+        names.iter().filter(|f| function_ignores_case(Dialect::ClickHouse, f)).map(|f| f.to_string()).collect();
+    ours.sort();
+    assert_eq!(ours, server);
+}

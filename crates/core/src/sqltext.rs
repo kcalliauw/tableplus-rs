@@ -262,7 +262,8 @@ const CLICKHOUSE_KEYWORDS: &[&str] = &[
     "TTL",
 ];
 
-/// Common ClickHouse functions. Names in mixed case are matched case-sensitively by the server.
+/// Common ClickHouse functions. The server matches most of them case-sensitively, even
+/// all-lowercase ones such as `uniq`; see [`CLICKHOUSE_CASE_INSENSITIVE`].
 const CLICKHOUSE_FUNCTIONS: &[&str] = &[
     "any",
     "anyLast",
@@ -335,9 +336,38 @@ pub fn keywords(dialect: Dialect) -> impl Iterator<Item = &'static str> {
     KEYWORDS.iter().chain(extra).copied()
 }
 
+/// The [`CLICKHOUSE_FUNCTIONS`] that `system.functions` marks `case_insensitive` (ClickHouse
+/// 25.8), sorted for binary search.
+const CLICKHOUSE_CASE_INSENSITIVE: &[&str] = &[
+    "avg",
+    "coalesce",
+    "concat",
+    "count",
+    "dateDiff",
+    "greatest",
+    "if",
+    "ifNull",
+    "least",
+    "length",
+    "lower",
+    "max",
+    "min",
+    "now",
+    "position",
+    "round",
+    "substring",
+    "sum",
+    "upper",
+];
+
 /// Functions offered by autocomplete.
 pub fn functions(dialect: Dialect) -> &'static [&'static str] {
     if dialect == Dialect::ClickHouse { CLICKHOUSE_FUNCTIONS } else { FUNCTIONS }
+}
+
+/// Whether the server accepts `name` from [`functions`] in any letter case.
+pub fn function_ignores_case(dialect: Dialect, name: &str) -> bool {
+    dialect != Dialect::ClickHouse || CLICKHOUSE_CASE_INSENSITIVE.binary_search(&name).is_ok()
 }
 
 pub fn is_keyword(word: &str, dialect: Dialect) -> bool {

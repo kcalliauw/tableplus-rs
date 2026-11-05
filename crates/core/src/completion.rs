@@ -3,7 +3,7 @@
 use crate::dialect::Dialect;
 use crate::fuzzy::fuzzy_match;
 use crate::model::{ColumnInfo, ObjectKind, SchemaObject};
-use crate::sqltext::{TokenKind, functions, keywords, statement_at, tokenize};
+use crate::sqltext::{TokenKind, function_ignores_case, functions, keywords, statement_at, tokenize};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletionContext {
@@ -286,8 +286,7 @@ pub fn complete(src: &str, cursor: usize, dialect: Dialect, catalog: &dyn Catalo
                 });
             }
             for f in functions(dialect) {
-                // A mixed-case name such as ClickHouse's `toDateTime` is case-sensitive.
-                let fold = upper && !f.chars().any(char::is_uppercase);
+                let fold = upper && function_ignores_case(dialect, f);
                 candidates.push(Suggestion {
                     label: format!("{f}()"),
                     insert: format!("{}(", if fold { f.to_ascii_uppercase() } else { f.to_string() }),
@@ -443,6 +442,8 @@ mod tests {
         };
         assert_eq!(insert("select TODATET", "toDateTime()").as_deref(), Some("toDateTime("));
         assert_eq!(insert("select COUN", "count()").as_deref(), Some("COUNT("));
+        assert_eq!(insert("select UNI", "uniq()").as_deref(), Some("uniq("));
+        assert_eq!(insert("select MEDI", "median()").as_deref(), Some("median("));
         assert_eq!(insert("select * from orders PREWH", "PREWHERE").as_deref(), Some("PREWHERE"));
         let pg = complete("select date_tr", 14, Dialect::Postgres, &cat());
         assert!(pg.suggestions.iter().any(|s| s.label == "date_trunc()"));

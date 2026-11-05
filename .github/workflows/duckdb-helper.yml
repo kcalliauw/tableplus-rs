@@ -58,18 +58,19 @@ jobs:
           MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
           MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
-          RCODESIGN: apple-codesign-0.29.0-aarch64-apple-darwin
-          RCODESIGN_SHA256: d1a532150adaf90048260d76359261aa716abafc45c53c5dc18845029184334a
+          # Not RCODESIGN_*: rcodesign reads those variables as its own settings.
+          SIGNER: apple-codesign-0.29.0-aarch64-apple-darwin
+          SIGNER_SHA256: d1a532150adaf90048260d76359261aa716abafc45c53c5dc18845029184334a
         run: |
           umask 077
           cd "$RUNNER_TEMP"
-          curl -fsSL "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F0.29.0/$RCODESIGN.tar.gz" -o rcodesign.tar.gz
-          echo "$RCODESIGN_SHA256  rcodesign.tar.gz" | shasum -a 256 -c
+          curl -fsSL "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F0.29.0/$SIGNER.tar.gz" -o rcodesign.tar.gz
+          echo "$SIGNER_SHA256  rcodesign.tar.gz" | shasum -a 256 -c
           tar xzf rcodesign.tar.gz
           echo "$MACOS_CERTIFICATE_P12" | base64 --decode > certificate.p12
           printf '%s' "$MACOS_CERTIFICATE_PASSWORD" > certificate.password
           cd "$GITHUB_WORKSPACE"
-          "$RUNNER_TEMP/$RCODESIGN/rcodesign" sign --for-notarization \
+          "$RUNNER_TEMP/$SIGNER/rcodesign" sign --for-notarization \
             --p12-file "$RUNNER_TEMP/certificate.p12" --p12-password-file "$RUNNER_TEMP/certificate.password" \
             target/release/tableplus-duckdb
           rm "$RUNNER_TEMP/certificate.p12" "$RUNNER_TEMP/certificate.password"

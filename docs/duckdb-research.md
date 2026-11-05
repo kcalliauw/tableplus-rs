@@ -1,6 +1,6 @@
 # DuckDB driver research
 
-Research for a full-featured DuckDB driver in tableplus-rs, on the `duckdb` branch (built on `visualizer`). Nothing in the app was changed. Scratch files, captured plans and scripts are in `/tmp/duckdb-research/`.
+Research for a full-featured DuckDB driver in tableplus-rs, on the `duckdb` branch. Sections 1 to 8 are the plan as researched; the build follows it, and section 9 records each phase as built, with the places where the code proved the plan wrong. Scratch files, captured plans and scripts from the research were in `/tmp/duckdb-research/` on the laptop.
 
 Versions in this document:
 
@@ -14,7 +14,7 @@ Versions in this document:
 
 **Recommended approach.**
 
-1. Use the official `duckdb` crate with the `bundled`, `json` and `parquet` features. Call the raw C API (`duckdb::ffi`) for the four things the crate hides: the statement count before running, the statement type, one shared instance per file, and query progress.
+1. Use the official `duckdb` crate with the `bundled`, `json` and `parquet` features. Call the raw C API (`duckdb::ffi`) for the four things the crate hides: the statement count before running, the statement type, one shared instance per file, and query progress. **Changed in the build:** the crate keeps its connection and statement handles private, so these calls can't reach them; the helper uses `libduckdb-sys` directly (section 9).
 2. Treat a DuckDB file like a SQLite file in the UI, but keep one helper process per file path for the whole app. That helper holds one DuckDB instance and opens each session with `try_clone()`.
 3. Ask for plans with `EXPLAIN (FORMAT JSON)` and `EXPLAIN (ANALYZE, FORMAT JSON)`, run Explain Analyze inside `BEGIN TRANSACTION READ ONLY` … `ROLLBACK`, and label times as thread time scaled to the statement's latency, as SQLite's cycle shares are labelled today.
 4. Keep the seed as `docker/seed/duckdb.sql` and build `testdata/shop.duckdb` with an example binary, exactly as `shop.sqlite` is built today. A working draft seed is in `/tmp/duckdb-research/duckdb.sql`; it reproduces the SQLite shop row for row.
@@ -144,7 +144,7 @@ Edit Connection (`is_new == false`, `conn_dialog.rs:21`) skips the grid and open
 - **No statement type, no `readonly()`.** The crate uses `duckdb_prepared_statement_type` only privately ([raw_statement.rs#L230-L237](https://github.com/duckdb/duckdb-rs/blob/v1.10506.1/crates/duckdb/src/raw_statement.rs#L230-L237)). Through `ffi`, SELECT reports 1, INSERT 2, CREATE 7 and EXPLAIN 4, while PRAGMA, SHOW and DESCRIBE also report 1 ([statement types](https://github.com/duckdb/duckdb/blob/v1.5.6/src/include/duckdb.h#L319-L351)). No C function says whether a statement writes.
 - **Column metadata.** Names and Arrow types are available only after execution. `column_logical_type(i)` works before execution and gives DuckDB's logical type, which the driver should use for `ColumnMeta.type_name`: Arrow reports `HUGEINT` as `Decimal128(38, 0)` and `JSON` as `Utf8` **[ran]**.
 - **Progress.** The crate has no wrapper for `duckdb_query_progress` ([duckdb.h#L3700-L3711](https://github.com/duckdb/duckdb/blob/v1.5.6/src/include/duckdb.h#L3700-L3711)) and keeps the raw connection handle private. Progress also needs `SET enable_progress_bar = true` on the connection; otherwise it returns -1.
-- **Alternatives.** The raw C API (`duckdb::ffi`, 546 bound functions) gives statement type, progress, the instance cache, streaming chunks and logical types, at the cost of `unsafe` code and hand-written decoders. ADBC (`adbc_driver_manager`) is Arrow-only. `async-duckdb` 0.3.1 is a thin thread-and-channel wrapper, and `quackdb` was last released in 2023. The official crate plus targeted `ffi` calls is the practical choice, the same way the SQLite driver uses `rusqlite::ffi` (`sqlite.rs:481-600`).
+- **Alternatives.** The raw C API (`duckdb::ffi`, 546 bound functions) gives statement type, progress, the instance cache, streaming chunks and logical types, at the cost of `unsafe` code and hand-written decoders. ADBC (`adbc_driver_manager`) is Arrow-only. `async-duckdb` 0.3.1 is a thin thread-and-channel wrapper, and `quackdb` was last released in 2023. The official crate plus targeted `ffi` calls looked like the practical choice, the same way the SQLite driver uses `rusqlite::ffi` (`sqlite.rs:481-600`). **The build proved this wrong** (section 9): `duckdb_extract_statements`, `duckdb_prepared_statement_type` and `duckdb_interrupt` need the `duckdb_connection` and `duckdb_prepared_statement` handles, which `Connection` and `Statement` keep private (`Statement.stmt` is `pub(crate)`), and `stream_arrow`'s iterator panics when a fetch fails ([arrow_batch.rs](https://github.com/duckdb/duckdb-rs/blob/v1.10506.1/crates/duckdb/src/arrow_batch.rs)), which an interrupt causes. The helper calls `libduckdb-sys` directly.
 
 ### Type mapping
 
@@ -178,6 +178,8 @@ Observed with the probe on the draft seed's `type_zoo` row **[ran]**. "Crate val
 | UNION | `Union(Box<Value>)` | `hi` | `Text` | |
 | VARIANT (1.5.0+) | error: "decoding Variant columns is not supported" | | `Text` via cast | |
 | GEOMETRY (built in from 1.5) | `Geometry(WKB)` | | `Text` via cast, or `Bytes` | |
+
+**As built (section 9)** the helper doesn't use the crate's `Value` at all. It reads BOOLEAN, the integer types, FLOAT, DOUBLE, VARCHAR and BLOB straight from DuckDB's vectors, and for every other type it wraps the statement as `SELECT #1, CAST(#2 AS VARCHAR) AS "c", … FROM (\n<statement>\n)` so DuckDB renders the text itself. Positional references keep duplicate column names and the inner row order; this works for SELECT, FROM-first queries, DESCRIBE, SHOW, SUMMARIZE, VALUES and PIVOT **[ran]**. Statements that can't be a subquery (PRAGMA, `INSERT … RETURNING`, CALL) are materialized and read through the C API's older per-cell `duckdb_value_varchar`, which returns NULL for TIMETZ, BIT, BIGNUM, LIST, STRUCT, MAP and VARIANT; those cells show their type name in parentheses. The plan below, a formatter per variant, was not needed.
 
 `Value` has no `Display` ([types/value.rs](https://github.com/duckdb/duckdb-rs/blob/v1.10506.1/crates/duckdb/src/types/value.rs#L12-L98)), so the driver needs its own formatter for every non-scalar variant, written to match DuckDB's cast output above. A user can also run `SET arrow_lossless_conversion = true`, after which UUID, TIMETZ and HUGEINT arrive as `Blob`, so the driver should decide by `column_logical_type`, not by the Arrow type.
 
@@ -518,12 +520,12 @@ Neither seed has triggers.
 Keep DuckDB exactly parallel to SQLite:
 
 - Check in `docker/seed/duckdb.sql`, adapted from the draft.
-- `crates/core/examples/make_duckdb.rs` writes `testdata/shop.duckdb`; add `/testdata/*.duckdb` and `/testdata/*.duckdb.wal` to `.gitignore`. Don't check the file in: it is 9 MiB, and a file written by a newer DuckDB can be unreadable by an older bundled one.
-- `duckdb_fixture(dir)` in `tests/common/mod.rs` creates the database through the app's driver from the seed text, as `sqlite_fixture` does. That also tests `execute_in_transaction` with DDL, sequences, enums and macros.
-- `crates/core/tests/duckdb.rs` mirrors `tests/sqlite.rs`: introspection, `type_zoo` rendering, editing with and without a primary key, streaming, cancel, and Explain and Explain Analyze through `exercise_explain` and `exercise_read_only_explain`.
+- `crates/core/examples/make_duckdb.rs` writes `testdata/shop.duckdb`; add `/testdata/*.duckdb` and `/testdata/*.duckdb.wal` to `.gitignore`. Don't check the file in: it is 9 MiB, and a file written by a newer DuckDB can be unreadable by an older bundled one. **As built:** core doesn't link DuckDB, so the example is `crates/engine-duckdb/examples/make_duckdb.rs`; it also writes `testdata/orders.parquet` for the data-file connection.
+- `duckdb_fixture(dir)` in `tests/common/mod.rs` creates the database through the app's driver from the seed text, as `sqlite_fixture` does. That also tests `execute_in_transaction` with DDL, sequences, enums and macros. **As built:** the fixture lives in `crates/engine-duckdb/tests/duckdb.rs`, which includes core's `tests/common/mod.rs` with `#[path]`.
+- `crates/core/tests/duckdb.rs` (as built: `crates/engine-duckdb/tests/duckdb.rs`) mirrors `tests/sqlite.rs`: introspection, `type_zoo` rendering, editing with and without a primary key, streaming, cancel, and Explain and Explain Analyze through `exercise_explain` and `exercise_read_only_explain`.
 - `plan_fixtures.rs` gets one captured DuckDB estimate and one profile, so parser tests run without building a database.
 
-**Screenshots.** `demo-home.sh` gains a `Shop (DuckDB)` connection and builds `testdata/shop.duckdb` when it's missing; `screenshots.sh` copies it to `~/Databases/shop.duckdb`. The welcome list is sorted by name, so `Shop (DuckDB)` lands between `Prod replica (via SSH)` and `Shop (MySQL 8)`. `ROW_MYSQL`, `ROW_POSTGRES` and `ROW_SQLITE` (`screenshots.sh:100-104`) each move down one 58 px row, and `ROW_DUCKDB=353` is added. A new `scene_duckdb` could show the `type_zoo` grid with nested values and Explain Analyze of the existing screenshot query, which runs on DuckDB unchanged.
+**Screenshots.** As built, `demo-home.sh` gains `Shop data (DuckDB)` and `Shop orders (Parquet)`, named to sort after `Shop (SQLite)` so the row offsets below don't move. The plan was: `demo-home.sh` gains a `Shop (DuckDB)` connection and builds `testdata/shop.duckdb` when it's missing; `screenshots.sh` copies it to `~/Databases/shop.duckdb`. The welcome list is sorted by name, so `Shop (DuckDB)` lands between `Prod replica (via SSH)` and `Shop (MySQL 8)`. `ROW_MYSQL`, `ROW_POSTGRES` and `ROW_SQLITE` (`screenshots.sh:100-104`) each move down one 58 px row, and `ROW_DUCKDB=353` is added. A new `scene_duckdb` could show the `type_zoo` grid with nested values and Explain Analyze of the existing screenshot query, which runs on DuckDB unchanged.
 
 ## 7. Shipping DuckDB as a downloadable helper
 
@@ -554,7 +556,7 @@ Linking DuckDB into the app makes every user pay for it: the 20.4 MB app grows b
 - **What stays in the app.** `Dialect::DuckDb`, `Flavor::DuckDb`, the plan parser, the `sqlgen.rs` and `alter.rs` arms, and the connection-dialog fields stay in `core` and `app`. They are small, the dialog must show DuckDB before the helper is installed, and the plan views then parse helper output with the same code as every other engine. The helper sends DuckDB's plan JSON as text, as the other drivers return it today.
 - **`RemoteConnection`.** One type in `core/src/driver/` implements `Connection` for any helper, and `connect()` gets a `DriverKind::DuckDb` arm that builds it. The UI keeps seeing an `Arc<dyn Connection>` and doesn't change.
 - **Messages.** One request per trait method: connect, query, query in batches, execute in transaction, explain, list databases, schemas and objects, table structure, object definition, cancel and ping. The first exchange is a handshake with the protocol version, engine name and engine version; the app refuses a helper whose versions don't match. Each request carries a session ID and a request ID, so several tabs share one helper and a reply finds its caller. `query_batches` answers with a stream of batch messages and a final count. Grid results already stop at `max_rows` and exports already arrive in batches, so the pipe never carries a whole table.
-- **Serializing results.** `StatementResult`, `Row`, `ColumnMeta`, `TableStructure` and the explain types don't derive `Serialize` today; in `model.rs` only two enums do. Adding the derives is mechanical but touches many types. JSON lines or a binary serde format such as `postcard` is a choice to make by measuring the shop data and the 50-million-row read from section 2.
+- **Serializing results.** `StatementResult`, `Row`, `ColumnMeta`, `TableStructure` and the explain types don't derive `Serialize` today; in `model.rs` only two enums do. Adding the derives is mechanical but touches many types. JSON lines or a binary serde format such as `postcard` is a choice to make by measuring the shop data and the 50-million-row read from section 2. **Measured and decided in phase 1: postcard** (section 9).
 - **Cancel.** The helper reads its standard input on its own thread, so a cancel message arrives while a query runs and calls the session's interrupt handle.
 - **Process model.** One helper process per canonical file path, and one per connection for `:memory:`. The per-path registry from section 2 moves into the app as a map from path to helper process; every session and the Test button go through it, so a file is never opened twice. Inside the helper there is one DuckDB instance and `try_clone()` per session.
 - **Crashes.** When a helper exits, `RemoteConnection` returns an error naming the exit code or signal, and the next request starts a new helper. The app keeps running.
@@ -594,7 +596,7 @@ crates/
 - A second program in each release, built, signed and notarized for every platform CI builds.
 - An HTTP client in the app for the download. The `clickhouse` measurement above includes `hyper` with `native-tls` at 1.18 MiB in total, so a download client should cost about 1 MiB or less (not measured on its own).
 - About 500 lines for `driver-host`, `RemoteConnection` and the messages, and about 400 for the installer and its Settings list. These are estimates.
-- Each batch is serialized, copied through the pipe and parsed. Not measured yet; phase 1 measures it before the format is fixed.
+- Each batch is serialized, copied through the pipe and parsed. Measured in phase 1 (section 9): postcard adds 5% to a 50-million-row export and 1.7 to 5 ms to a grid page.
 
 ## 8. Proposed build order and open questions
 
@@ -614,3 +616,39 @@ crates/
 4. **Explain Analyze times.** Scale thread time to the statement's latency, as SQLite's cycle shares are scaled, or show raw thread time? Recommendation: scale.
 5. **MotherDuck.** In scope for the first release, or later? It needs a token field, the extension download, and plans from a partly remote engine that this research didn't capture.
 6. **Helpers from other people.** Only helpers released with the app, checked by hash, or a plugin system open to others? Recommendation: released helpers only.
+
+## 9. As built
+
+### Phase 1: helper, connect and browse
+
+Built on the Mac mini (Apple M4 Pro, 14 cores, rustc 1.99.1) on 2026-11-05.
+
+**Where the build differs from the plan.**
+
+- **No `duckdb` crate.** `crates/engine-duckdb` links `libduckdb-sys` =1.10506.1 (DuckDB 1.5.6) with `bundled`, `json` and `parquet`, and wraps the C API in `src/raw.rs`. The reasons are in section 3 under Alternatives. Streaming uses `duckdb_execute_prepared_streaming` and `duckdb_fetch_chunk`; the C API marks the streaming entry points deprecated since 1.0.0 without a replacement, and the crate uses the same call.
+- **Cells are cast by DuckDB, not formatted by the driver** (section 3, after the type table). The lossy types the research found (TIMETZ, TIME_NS, BIT, BIGNUM, VARIANT) all arrive as DuckDB's own text.
+- **Results.** The C API's `duckdb_result_return_type` tells rows from changed-row counts, so the driver doesn't need the statement type to read `Count` and `Success` columns. INSERT, UPDATE and DELETE return `Affected(n)`; CREATE, SET, BEGIN and the like return `Affected(0)`. A text with several statements runs them in order and returns the last one's result.
+- **`main` is internal.** `duckdb_schemas()` reports `internal = true` for the file's own `main` schema in 1.5.6, so the schema query keeps `main` explicitly (`NOT internal OR schema_name = 'main'`).
+- **File connections skip the Keychain.** The app read the Keychain on every connect, even for SQLite, which has no password. SQLite and DuckDB connections now never call the secrets store.
+- **Card size.** The release helper is 35.9 MB (34.2 MiB) stripped, 12.0 MB gzip-compressed and 7.4 MB with xz, so the engine card says 36 MB, not 33 MB.
+- **DuckDB 2.0.0** was released after the research (crate 1.20000.1, 2026-10-28). The build stays on 1.5.6, which every measurement here is for.
+
+**The pipe, measured.** `crates/engine-duckdb/examples/pipe_bench.rs` on `testdata/shop.duckdb` opened read-only, release builds, median of 5 runs (the 50-million-row export ran once). "Grid" is `query` with the app's default limit of 100,000 rows; "export" is `query_batches` in batches of 5,000, as the export dialog uses. The 50-million-row query is `SELECT range AS id, range * 2 AS v, 'row ' || range AS label FROM range(50000000)`.
+
+| Read | In-process | Pipe, postcard | Pipe, JSON |
+|---|---|---|---|
+| Grid: `order_items`, 40,001 rows | 0.7 ms | 2.4 ms | 7.6 ms |
+| Grid: `orders`, 20,000 rows | 1.7 ms | 4.1 ms | 8.3 ms |
+| Grid: `users`, 5,000 rows | 0.9 ms | 1.9 ms | 3.1 ms |
+| Grid: first 100,000 of 50M rows | 4.9 ms | 10.3 ms | 20.1 ms |
+| Export: `orders`, 20,000 rows | 1.9 ms | 2.9 ms | 5.9 ms |
+| Export: 50M rows | 2,227 ms | 2,334 ms | 5,250 ms |
+| First batch of the 50M export | 0.98 ms | 1.31 ms | 1.76 ms |
+| Peak memory of the helper, whole run | | 53 MB | 92 MB |
+| Peak memory of the app side, whole run | 50 MB (DuckDB included) | 33 MB | 33 MB |
+
+The 50-million-row export is limited by building the rows, not by the pipe: the helper reads the next chunk while the app decodes the last batch, so postcard adds 5%. JSON is 2.2 times slower on that read and can't carry NaN or infinite floats, which `serde_json` writes as `null` and then fails to read. **The protocol uses postcard**, one frame per message (a `u32` length, then the bytes), and the JSON codec was removed after the measurement.
+
+**Sizes.** The release app (`target/release/tableplus-rs`) is 21,542,496 bytes on `duckdb`, against 21,306,928 bytes built from `main` (368600c) the same day: the pipe, postcard, the engine list and the two-step dialog add 0.24 MB. The 20.4 MB in sections 1 and 7 predates ClickHouse. The helper is 35.9 MB.
+
+**Tests.** `cargo test -p engine-duckdb` starts the built helper for each test: browsing the shop, the type zoo, statement results, cancel (the query stops within 2 s), two sessions and the Test button sharing one helper on a file, read-only files, Parquet, CSV and JSON files as views, and a missing helper. The seed reproduces the SQLite shop's checks: 20,000 orders summing to 49,923,728.75, balances summing to 2,499,975.00, 40,001 order items, user 123 "Linus Turing", and the last order at 2024-05-05 00:00:00 (checked against `shop.sqlite` with the sqlite3 CLI).

@@ -2,7 +2,8 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # duckdb: the fork's DuckDB work; keep this line out of upstream pull requests.
+    branches: [main, duckdb]
   pull_request:
 
 env:

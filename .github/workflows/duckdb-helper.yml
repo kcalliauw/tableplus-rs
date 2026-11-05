@@ -51,29 +51,31 @@ jobs:
       - name: Build
         run: cargo build --release --locked -p engine-duckdb --bin tableplus-duckdb
       - name: Sign
+        # rcodesign signs straight from the .p12. codesign needs a keychain, and on this runner,
+        # which runs as a launchd service with no login session, it fails with
+        # errSecInternalComponent.
         env:
           MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
           MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          RCODESIGN: apple-codesign-0.29.0-aarch64-apple-darwin
+          RCODESIGN_SHA256: d1a532150adaf90048260d76359261aa716abafc45c53c5dc18845029184334a
         run: |
-          KEYCHAIN="$RUNNER_TEMP/helper-signing.keychain-db"
-          KEYCHAIN_PASSWORD="$(uuidgen)"
-          echo "$MACOS_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          security set-keychain-settings -lut 3600 "$KEYCHAIN"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
-          security import "$RUNNER_TEMP/certificate.p12" -k "$KEYCHAIN" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          # codesign needs Apple's Developer ID G2 intermediate to build the chain, and the runner's
-          # own keychains may not have it.
-          curl -fsSL https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer -o "$RUNNER_TEMP/DeveloperIDG2CA.cer"
-          echo "f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a  $RUNNER_TEMP/DeveloperIDG2CA.cer" | shasum -a 256 -c
-          security import "$RUNNER_TEMP/DeveloperIDG2CA.cer" -k "$KEYCHAIN"
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
-          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
-          rm "$RUNNER_TEMP/certificate.p12"
-          codesign --force --options runtime --timestamp --keychain "$KEYCHAIN" \
-            --sign "$MACOS_SIGN_IDENTITY" target/release/tableplus-duckdb
+          umask 077
+          cd "$RUNNER_TEMP"
+          curl -fsSL "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign%2F0.29.0/$RCODESIGN.tar.gz" -o rcodesign.tar.gz
+          echo "$RCODESIGN_SHA256  rcodesign.tar.gz" | shasum -a 256 -c
+          tar xzf rcodesign.tar.gz
+          echo "$MACOS_CERTIFICATE_P12" | base64 --decode > certificate.p12
+          printf '%s' "$MACOS_CERTIFICATE_PASSWORD" > certificate.password
+          cd "$GITHUB_WORKSPACE"
+          "$RUNNER_TEMP/$RCODESIGN/rcodesign" sign --for-notarization \
+            --p12-file "$RUNNER_TEMP/certificate.p12" --p12-password-file "$RUNNER_TEMP/certificate.password" \
+            target/release/tableplus-duckdb
+          rm "$RUNNER_TEMP/certificate.p12" "$RUNNER_TEMP/certificate.password"
           codesign --verify --strict --verbose=2 target/release/tableplus-duckdb
+          codesign -dvv target/release/tableplus-duckdb 2>&1 | grep -qxF "Authority=$MACOS_SIGN_IDENTITY" \
+            || { echo "::error::The helper isn't signed by MACOS_SIGN_IDENTITY"; exit 1; }
       - name: Notarize
         env:
           NOTARY_API_KEY_P8: ${{ secrets.NOTARY_API_KEY_P8 }}
@@ -82,14 +84,14 @@ jobs:
         run: |
           printf '%s' "$NOTARY_API_KEY_P8" > "$RUNNER_TEMP/notary.p8"
           ditto -c -k target/release/tableplus-duckdb "$RUNNER_TEMP/tableplus-duckdb.zip"
-          xcrun notarytool submit "$RUNNER_TEMP/tableplus-duckdb.zip" --wait \
-            --key "$RUNNER_TEMP/notary.p8" --key-id "$NOTARY_API_KEY_ID" --issuer "$NOTARY_API_ISSUER_ID"
+          xcrun notarytool submit "$RUNNER_TEMP/tableplus-duckdb.zip" --wait --output-format json \
+            --key "$RUNNER_TEMP/notary.p8" --key-id "$NOTARY_API_KEY_ID" --issuer "$NOTARY_API_ISSUER_ID" \
+            | tee "$RUNNER_TEMP/notary.json"
           rm "$RUNNER_TEMP/notary.p8" "$RUNNER_TEMP/tableplus-duckdb.zip"
+          grep -Eq '"status" *: *"Accepted"' "$RUNNER_TEMP/notary.json" \
+            || { echo "::error::Apple didn't accept the helper for notarization"; exit 1; }
       - name: Package
         run: scripts/package-helper.sh target/release/tableplus-duckdb macos-aarch64 dist
-      - name: Remove the signing keychain
-        if: always()
-        run: security delete-keychain "$RUNNER_TEMP/helper-signing.keychain-db" 2>/dev/null || true
       - uses: actions/upload-artifact@v4
         with:
           name: helper-macos-aarch64

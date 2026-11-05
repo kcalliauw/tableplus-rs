@@ -52,6 +52,20 @@ async fn mysql_over_ssh_key() {
     assert_eq!(driver::scalar(conn.as_ref(), "SELECT COUNT(*) FROM users").await.unwrap().as_deref(), Some("10000"));
 }
 
+/// ClickHouse's default TLS mode, Prefer, tries HTTPS through the tunnel first and falls back to
+/// plain HTTP.
+#[tokio::test(flavor = "multi_thread")]
+async fn clickhouse_over_ssh_key() {
+    let mut cfg = clickhouse_config();
+    cfg.host = "clickhouse".into();
+    cfg.port = 8123;
+    cfg.ssh = bastion(SshAuth::PrivateKey);
+    let Some(conn) = connect_or_skip(&cfg, &password()).await else {
+        return;
+    };
+    assert_eq!(driver::scalar(conn.as_ref(), "SELECT count() FROM users").await.unwrap().as_deref(), Some("200"));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn ssh_bad_password_is_reported() {
     let mut cfg = pg_config();

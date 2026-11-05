@@ -113,7 +113,7 @@ impl CodeEditor {
             let n = popup.items.len();
             // Enter on a word that already matches the suggestion starts a new line instead.
             let typed = text.get(popup.replace_start..popup.cursor.min(text.len())).unwrap_or("");
-            let complete_word = tableplus_core::sqltext::is_keyword(typed)
+            let complete_word = tableplus_core::sqltext::is_keyword(typed, dialect)
                 || popup
                     .items
                     .iter()

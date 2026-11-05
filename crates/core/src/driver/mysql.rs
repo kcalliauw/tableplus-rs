@@ -558,7 +558,7 @@ impl Connection for MyConnection {
             .next()
             .and_then(|r| r[0].clone())
             .filter(|c| !c.is_empty());
-        Ok(TableStructure { columns, indexes, constraints, comment })
+        Ok(TableStructure { columns, indexes, constraints, comment, sorting_key: Vec::new() })
     }
 
     async fn object_definition(&self, o: &SchemaObject) -> Result<String> {

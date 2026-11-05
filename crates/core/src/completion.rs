@@ -3,7 +3,7 @@
 use crate::dialect::Dialect;
 use crate::fuzzy::fuzzy_match;
 use crate::model::{ColumnInfo, ObjectKind, SchemaObject};
-use crate::sqltext::{FUNCTIONS, KEYWORDS, TokenKind, statement_at, tokenize};
+use crate::sqltext::{TokenKind, function_ignores_case, functions, keywords, statement_at, tokenize};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletionContext {
@@ -148,7 +148,7 @@ pub fn referenced_tables(sql: &str, dialect: Dialect) -> Vec<TableRef> {
 pub fn quote_if_needed(dialect: Dialect, ident: &str) -> String {
     let simple = ident.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
         && ident.chars().all(|c| c.is_alphanumeric() || c == '_')
-        && !crate::sqltext::is_keyword(ident);
+        && !crate::sqltext::is_keyword(ident, dialect);
     let case_ok = dialect != Dialect::Postgres || !ident.chars().any(|c| c.is_uppercase());
     if simple && case_ok { ident.to_string() } else { dialect.quote_ident(ident) }
 }
@@ -277,7 +277,7 @@ pub fn complete(src: &str, cursor: usize, dialect: Dialect, catalog: &dyn Catalo
                 relation(o, &mut candidates, true);
             }
             let upper = ctx.prefix.chars().any(char::is_uppercase);
-            for k in KEYWORDS {
+            for k in keywords(dialect) {
                 candidates.push(Suggestion {
                     label: k.to_string(),
                     insert: if upper { k.to_string() } else { k.to_ascii_lowercase() },
@@ -285,10 +285,11 @@ pub fn complete(src: &str, cursor: usize, dialect: Dialect, catalog: &dyn Catalo
                     detail: "Keyword".into(),
                 });
             }
-            for f in FUNCTIONS {
+            for f in functions(dialect) {
+                let fold = upper && function_ignores_case(dialect, f);
                 candidates.push(Suggestion {
                     label: format!("{f}()"),
-                    insert: format!("{}(", if upper { f.to_ascii_uppercase() } else { f.to_string() }),
+                    insert: format!("{}(", if fold { f.to_ascii_uppercase() } else { f.to_string() }),
                     kind: SuggestionKind::Function,
                     detail: "Function".into(),
                 });
@@ -429,6 +430,23 @@ mod tests {
         assert_eq!(quote_if_needed(Dialect::Postgres, "Users"), "\"Users\"");
         assert_eq!(quote_if_needed(Dialect::MySql, "Users"), "Users");
         assert_eq!(quote_if_needed(Dialect::MySql, "order"), "`order`");
+        assert_eq!(quote_if_needed(Dialect::ClickHouse, "Final"), "`Final`");
+        assert_eq!(quote_if_needed(Dialect::MySql, "Final"), "Final");
+    }
+
+    #[test]
+    fn clickhouse_functions_keep_their_case() {
+        let insert = |src: &str, label: &str| {
+            let r = complete(src, src.len(), Dialect::ClickHouse, &cat());
+            r.suggestions.into_iter().find(|s| s.label == label).map(|s| s.insert)
+        };
+        assert_eq!(insert("select TODATET", "toDateTime()").as_deref(), Some("toDateTime("));
+        assert_eq!(insert("select COUN", "count()").as_deref(), Some("COUNT("));
+        assert_eq!(insert("select UNI", "uniq()").as_deref(), Some("uniq("));
+        assert_eq!(insert("select MEDI", "median()").as_deref(), Some("median("));
+        assert_eq!(insert("select * from orders PREWH", "PREWHERE").as_deref(), Some("PREWHERE"));
+        let pg = complete("select date_tr", 14, Dialect::Postgres, &cat());
+        assert!(pg.suggestions.iter().any(|s| s.label == "date_trunc()"));
     }
 
     #[test]

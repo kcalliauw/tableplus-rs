@@ -130,11 +130,11 @@ impl TableTab {
         self.result.as_ref().map(|r| r.columns.iter().map(|c| c.name.clone()).collect()).unwrap_or_default()
     }
 
-    /// The user's sort followed by the primary key, so paging and post-commit reloads are
+    /// The user's sort followed by the paging key, so paging and post-commit reloads are
     /// stable even when the sort column has duplicates.
     fn effective_sort(&self) -> Vec<SortKey> {
-        let pk = self.structure.as_ref().map(|st| st.primary_key()).unwrap_or_default();
-        sqlgen::with_tiebreaker(&self.sort, &pk)
+        let key = self.structure.as_ref().map(|st| st.paging_key()).unwrap_or_default();
+        sqlgen::with_tiebreaker(&self.sort, &key)
     }
 
     fn where_clause(&self) -> Option<String> {
@@ -280,7 +280,17 @@ impl TableTab {
     }
 
     fn editable(&self) -> bool {
-        self.object.kind == tableplus_core::model::ObjectKind::Table && self.structure.is_some()
+        self.object.kind == tableplus_core::model::ObjectKind::Table
+            && self.structure.is_some()
+            && self.dialect().read_only_reason().is_none()
+    }
+
+    /// The tooltip of a row action, with why it's off when the database can't edit rows here.
+    fn row_action_tip(&self, action: &str) -> String {
+        match self.dialect().read_only_reason() {
+            Some(why) => format!("{action}\n{why}"),
+            None => action.to_string(),
+        }
     }
 
     fn handle_grid_events(&mut self, events: Vec<GridEvent>, ctx: &mut TabCtx) {
@@ -589,7 +599,8 @@ impl TableTab {
             ui.add_space(6.0);
             if self.view == TableView::Data {
                 let editable = self.editable();
-                if widgets::icon_button_sized(ui, Icon::Plus, "Add row", vec2(26.0, 24.0), editable).clicked() {
+                let tip = self.row_action_tip("Add row");
+                if widgets::icon_button_sized(ui, Icon::Plus, &tip, vec2(26.0, 24.0), editable).clicked() {
                     let ncols = self.result.as_ref().map_or(0, |r| r.columns.len());
                     self.staged.add_row(ncols);
                     let rows = self.result.as_ref().map_or(0, |r| r.rows.len());
@@ -599,7 +610,7 @@ impl TableTab {
                 if widgets::icon_button_sized(
                     ui,
                     Icon::Minus,
-                    "Delete selected rows",
+                    &self.row_action_tip("Delete selected rows"),
                     vec2(26.0, 24.0),
                     editable && has_sel,
                 )

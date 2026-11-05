@@ -122,11 +122,21 @@ pub struct TableStructure {
     pub indexes: Vec<IndexInfo>,
     pub constraints: Vec<ConstraintInfo>,
     pub comment: Option<String>,
+    /// ClickHouse: the columns its sorting key names, in key order, then for MergeTree tables the
+    /// `_part` and `_part_offset` virtual columns, which together name one stored row. Rows are
+    /// stored in this order, so paging by it reads the least. Empty elsewhere.
+    pub sorting_key: Vec<String>,
 }
 
 impl TableStructure {
     pub fn primary_key(&self) -> Vec<String> {
         self.columns.iter().filter(|c| c.primary_key).map(|c| c.name.clone()).collect()
+    }
+
+    /// Columns that break ties between sorted rows so pages don't overlap: the sorting key where
+    /// there is one, else the primary key.
+    pub fn paging_key(&self) -> Vec<String> {
+        if self.sorting_key.is_empty() { self.primary_key() } else { self.sorting_key.clone() }
     }
 
     pub fn column(&self, name: &str) -> Option<&ColumnInfo> {

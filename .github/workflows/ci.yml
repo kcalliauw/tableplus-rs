@@ -26,14 +26,16 @@ jobs:
         run: cargo fmt --all --check
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Tests (unit + PostgreSQL / MySQL / MariaDB / SQLite / SSH integration)
+      - name: Tests (unit + PostgreSQL / MySQL / MariaDB / SQLite / ClickHouse / SSH integration)
         run: cargo test --workspace
         env:
           TABLEPLUS_REQUIRE_DB: "1"
 
   macos:
     name: macOS · build + unit tests
-    runs-on: macos-latest
+    # The self-hosted Mac mini only builds branches of this repo, never pull requests from forks.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, macOS, ARM64, tableplus]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

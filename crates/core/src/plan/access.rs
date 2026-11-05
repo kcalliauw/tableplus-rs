@@ -156,6 +156,7 @@ impl Plan {
             }
             PlanFormat::PostgresJson => postgres_access(node),
             PlanFormat::SqliteQueryPlan | PlanFormat::SqliteScanStatus => self.sqlite_access(node),
+            PlanFormat::ClickHouseText => None,
         }
     }
 
@@ -175,7 +176,7 @@ impl Plan {
                     || (matches!(op, "Union" | "Recursive union") && node.reads_internal_name())
             }
             PlanFormat::SqliteQueryPlan | PlanFormat::SqliteScanStatus => op == "Materialize",
-            PlanFormat::PostgresJson => false,
+            PlanFormat::PostgresJson | PlanFormat::ClickHouseText => false,
         };
         if temp {
             extras.push(Extra::TempTable);

@@ -328,7 +328,7 @@ impl Connection for SqliteConnection {
                 definition: check,
             });
         }
-        Ok(TableStructure { columns, indexes, constraints, comment: None })
+        Ok(TableStructure { columns, indexes, constraints, comment: None, sorting_key: Vec::new() })
     }
 
     async fn object_definition(&self, o: &SchemaObject) -> Result<String> {

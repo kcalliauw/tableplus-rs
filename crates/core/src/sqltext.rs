@@ -330,10 +330,43 @@ const CLICKHOUSE_FUNCTIONS: &[&str] = &[
     "upper",
 ];
 
-/// The dialect's keywords: [`KEYWORDS`] and, for ClickHouse, its own.
+/// DuckDB words [`KEYWORDS`] lacks, sorted for binary search.
+const DUCKDB_KEYWORDS: &[&str] = &[
+    "ANTI",
+    "ASOF",
+    "ATTACH",
+    "COLUMNS",
+    "COPY",
+    "DETACH",
+    "EXCLUDE",
+    "EXPORT",
+    "IMPORT",
+    "INSTALL",
+    "LOAD",
+    "MACRO",
+    "PIVOT",
+    "PIVOT_LONGER",
+    "PIVOT_WIDER",
+    "POSITIONAL",
+    "PRAGMA",
+    "QUALIFY",
+    "SEMI",
+    "SUMMARIZE",
+    "UNPIVOT",
+];
+
+/// The keywords a dialect adds to [`KEYWORDS`].
+fn dialect_keywords(dialect: Dialect) -> &'static [&'static str] {
+    match dialect {
+        Dialect::ClickHouse => CLICKHOUSE_KEYWORDS,
+        Dialect::DuckDb => DUCKDB_KEYWORDS,
+        Dialect::Postgres | Dialect::MySql | Dialect::Sqlite => &[],
+    }
+}
+
+/// The dialect's keywords: [`KEYWORDS`] and its own.
 pub fn keywords(dialect: Dialect) -> impl Iterator<Item = &'static str> {
-    let extra: &[&str] = if dialect == Dialect::ClickHouse { CLICKHOUSE_KEYWORDS } else { &[] };
-    KEYWORDS.iter().chain(extra).copied()
+    KEYWORDS.iter().chain(dialect_keywords(dialect)).copied()
 }
 
 /// The [`CLICKHOUSE_FUNCTIONS`] that `system.functions` marks `case_insensitive` (ClickHouse
@@ -373,7 +406,7 @@ pub fn function_ignores_case(dialect: Dialect, name: &str) -> bool {
 pub fn is_keyword(word: &str, dialect: Dialect) -> bool {
     let upper = word.to_ascii_uppercase();
     let found = |list: &[&str]| list.binary_search(&upper.as_str()).is_ok();
-    found(KEYWORDS) || (dialect == Dialect::ClickHouse && found(CLICKHOUSE_KEYWORDS))
+    found(KEYWORDS) || found(dialect_keywords(dialect))
 }
 
 /// PostgreSQL, MySQL and SQLite read every non-ASCII character, a no-break space included, as part
@@ -682,6 +715,10 @@ mod tests {
         let mut sorted = KEYWORDS.to_vec();
         sorted.sort_unstable();
         assert_eq!(sorted, KEYWORDS, "KEYWORDS must stay sorted for binary search");
+        let mut duckdb = DUCKDB_KEYWORDS.to_vec();
+        duckdb.sort_unstable();
+        assert_eq!(duckdb, DUCKDB_KEYWORDS, "DUCKDB_KEYWORDS must stay sorted for binary search");
+        assert!(is_keyword("summarize", Dialect::DuckDb) && !is_keyword("summarize", Dialect::Postgres));
         let mut sorted = CLICKHOUSE_KEYWORDS.to_vec();
         sorted.sort_unstable();
         assert_eq!(sorted, CLICKHOUSE_KEYWORDS, "CLICKHOUSE_KEYWORDS must stay sorted for binary search");

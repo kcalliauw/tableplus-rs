@@ -17,6 +17,8 @@ pub enum SecretKind {
 }
 
 impl SecretKind {
+    pub const ALL: [SecretKind; 3] = [SecretKind::Password, SecretKind::SshPassword, SecretKind::SshPassphrase];
+
     fn suffix(self) -> &'static str {
         match self {
             SecretKind::Password => "password",
@@ -57,7 +59,7 @@ impl SecretStore {
     }
 
     pub fn delete_all(&self, id: Uuid) -> Result<()> {
-        for kind in [SecretKind::Password, SecretKind::SshPassword, SecretKind::SshPassphrase] {
+        for kind in SecretKind::ALL {
             self.delete(&secret_key(id, kind))?;
         }
         Ok(())

@@ -236,6 +236,10 @@ impl TablePlusApp {
     }
 
     fn credentials(&self, config: &ConnectionConfig) -> Credentials {
+        // A file has no password, so its connections never reach the Keychain.
+        if config.driver.is_file_based() {
+            return Credentials::default();
+        }
         Credentials {
             password: self.secrets.get_for(config.id, SecretKind::Password),
             ssh_password: self.secrets.get_for(config.id, SecretKind::SshPassword),
@@ -494,7 +498,8 @@ impl TablePlusApp {
                 }
                 Action::DuplicateConnection(id) => match self.store.duplicate(id) {
                     Ok(Some(copy)) => {
-                        for kind in [SecretKind::Password, SecretKind::SshPassword, SecretKind::SshPassphrase] {
+                        let kinds = if copy.driver.is_file_based() { &[][..] } else { &SecretKind::ALL[..] };
+                        for &kind in kinds {
                             if let Some(v) = self.secrets.get_for(id, kind) {
                                 let _ = self.secrets.set_for(copy.id, kind, &v);
                             }
@@ -505,10 +510,13 @@ impl TablePlusApp {
                     Err(e) => self.toast(ToastKind::Error, format!("{e:#}")),
                 },
                 Action::DeleteConnection(id) => {
+                    let had_secrets = self.store.get(id).is_some_and(|c| !c.driver.is_file_based());
                     if let Err(e) = self.store.remove(id) {
                         self.toast(ToastKind::Error, format!("{e:#}"));
                     }
-                    let _ = self.secrets.delete_all(id);
+                    if had_secrets {
+                        let _ = self.secrets.delete_all(id);
+                    }
                 }
                 Action::ShowWelcome => self.active = None,
                 Action::SwitchSession(i) => self.active = Some(i),

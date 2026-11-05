@@ -98,7 +98,7 @@ App crate:
 
 | Place | What changes |
 |---|---|
-| `conn_dialog.rs:105`, `:113-138` | The driver picker lays 132 px tiles in a 580 px dialog. Five tiles need 660 px plus spacing, so the row needs smaller tiles or a second row. |
+| `conn_dialog.rs:105`, `:113-144` | The driver picker splits the fixed 580 px dialog evenly between `DriverKind::ALL`. Five tiles are about 110 px each; a sixth makes them about 90 px, and "PostgreSQL" or "ClickHouse" plus the badge (about 90 px) runs past the tile's right edge, because the code only clamps the left side (`:126`). Decided by Koen on 2026-11-05: New Connection becomes two steps, see "The engine picker" below. |
 | `conn_dialog.rs:178-190` | The file row's hint (`/path/to/database.sqlite`) and the Browse filter (`"SQLite"`: `sqlite`, `sqlite3`, `db`, `db3`) are SQLite-specific. DuckDB files usually end in `.duckdb` or `.ddb`. Read-only and `:memory:` options go here too. |
 | `conn_dialog.rs:93`, `:356` | Validation follows `is_file_based` once it includes DuckDB. |
 | `welcome.rs:21-28`, `:154` | Badge colour, and the empty-state copy that lists the engines. |
@@ -106,6 +106,28 @@ App crate:
 | `session.rs:122-134`, `sidebar.rs:73-74` | The sidebar has one level of schemas; DuckDB has `database.schema` (section 4). |
 | `plan_view.rs`, `plan_graph.rs`, `plan_flame.rs` | No engine branches; only tests construct formats. |
 | `scripts/demo-home.sh`, `scripts/screenshots.sh` | A saved DuckDB connection and the welcome-row offsets (section 6). |
+
+### The engine picker
+
+Decided by Koen on 2026-11-05. New Connection opens in two steps:
+
+1. **Engine grid.** Large cards, three per row, one per `DriverKind::ALL` entry, each with its badge and name. A helper engine whose helper isn't installed shows its download size on the card (DuckDB: "33 MB"). Clicking a card goes to step 2.
+2. **Form.** The current form, without the tile row, with a "Back" link to the grid and the chosen engine's badge and name in the heading. For DuckDB without its helper, the form shows the install panel from section 7 above the fields, and Save and Test stay disabled until the install finishes.
+
+Edit Connection (`is_new == false`, `conn_dialog.rs:21`) skips the grid and opens the form, since a saved connection keeps its engine. The grid has room for more engines without layout changes; three per row fits the 580 px dialog with cards about 185 px wide.
+
+```
+ Step 1: New Connection                   Step 2: form
+ ┌──────────┐ ┌──────────┐ ┌──────────┐   ‹ Back   [Dk] DuckDB
+ │   [Pg]   │ │   [My]   │ │   [Ma]   │   ┌─────────────────────────────┐
+ │PostgreSQL│ │  MySQL   │ │ MariaDB  │   │ DuckDB support isn't        │
+ └──────────┘ └──────────┘ └──────────┘   │ installed (33 MB). [Install]│
+ ┌──────────┐ ┌──────────┐ ┌──────────┐   └─────────────────────────────┘
+ │   [Ch]   │ │   [Sq]   │ │   [Dk]   │   Name          [__________]
+ │ClickHouse│ │  SQLite  │ │  DuckDB  │   Database file [__________] Browse…
+ └──────────┘ └──────────┘ │  33 MB   │   [ ] Read-only  [ ] In memory
+                           └──────────┘
+```
 
 ## 3. The Rust crate and type mapping
 
@@ -260,7 +282,8 @@ Option 2 is the smallest change that makes ATTACH useful; this is a decision for
 | Fast CSV export | `COPY … TO 'f.csv' (HEADER, DELIM ',')` | New, optional; much faster than exporting row by row. |
 | Import CSV | App-side `csv_to_inserts` (`export.rs:201-271`) | Existing. `INSERT INTO t SELECT * FROM read_csv('f.csv')` with type sniffing ([auto detection](https://duckdb.org/docs/current/data/csv/auto_detection)) would be a faster new path. |
 | Import Parquet or JSON | `read_parquet`, `read_json` | New. |
-| Query files directly | `SELECT * FROM 'orders.parquet'` | Works in the SQL editor as is. |
+| Query files directly | `SELECT * FROM 'orders.parquet'` | Works in the SQL editor as is. The `parquet` and `json` features are compiled into the helper, so this needs no extension download. |
+| Open a data file directly | Drop a `.parquet`, `.csv` or `.json` file on the app, or pick one with "Open file…", and get an in-memory DuckDB connection with one view per file: `CREATE VIEW orders AS SELECT * FROM read_parquet('/path/orders.parquet')` | New, proposed 2026-11-05. The view shows in the sidebar like a table, so browsing, filtering and export work without SQL. The connection saves the file list and recreates the views at each connect, the same mechanism as the ATTACH list in section 4. The app has no file-drop handling today (no `dropped_files` in `crates/app`). Views read the file on every query; "Import into a table" (`CREATE TABLE … AS SELECT …`) is the step for speed. |
 | Dump the database | `EXPORT DATABASE 'dir' (FORMAT parquet)` writes `schema.sql`, `load.sql` and data; `IMPORT DATABASE` needs a fresh database ([export](https://duckdb.org/docs/current/sql/statements/export)) | New. |
 | Copy a database | `COPY FROM DATABASE a TO b` | New. From the SQLite shop it kept primary keys, NOT NULL, defaults and indexes, and dropped UNIQUE, CHECK, foreign keys and both views **[ran]**. |
 
@@ -534,7 +557,7 @@ Linking DuckDB into the app makes every user pay for it: the 20.4 MB app grows b
 - **Cancel.** The helper reads its standard input on its own thread, so a cancel message arrives while a query runs and calls the session's interrupt handle.
 - **Process model.** One helper process per canonical file path, and one per connection for `:memory:`. The per-path registry from section 2 moves into the app as a map from path to helper process; every session and the Test button go through it, so a file is never opened twice. Inside the helper there is one DuckDB instance and `try_clone()` per session.
 - **Crashes.** When a helper exits, `RemoteConnection` returns an error naming the exit code or signal, and the next request starts a new helper. The app keeps running.
-- **Install on first use.** A list compiled into the app names each helper engine with its version, its download address, size and SHA-256 hash for each platform. Picking DuckDB in the connection dialog without the helper shows "DuckDB support isn't installed (33 MB). Install" with a progress bar. The helper goes to `<config dir>/engines/duckdb/<version>/`, where `<config dir>` is the app's configuration directory (`TABLEPLUS_RS_HOME` or the default in the README). The app checks the hash after the download and before each start, so it only runs the exact helper it was released with. A Settings list shows installed engines with update and remove, and "Install from file" covers machines without internet. This follows the decision for DuckDB extensions: nothing is downloaded without an explicit Install.
+- **Install on first use.** A list compiled into the app names each helper engine with its version, its download address, size and SHA-256 hash for each platform. The DuckDB card in the engine grid shows its 33 MB size, and its form shows "DuckDB support isn't installed (33 MB). Install" with a progress bar (see "The engine picker" in section 2). Clicking Install is the user's confirmation; nothing downloads before it. The helper goes to `<config dir>/engines/duckdb/<version>/`, where `<config dir>` is the app's configuration directory (`TABLEPLUS_RS_HOME` or the default in the README). The app checks the hash after the download and before each start, so it only runs the exact helper it was released with. A Settings list shows installed engines with update and remove, and "Install from file" covers machines without internet. This follows the decision for DuckDB extensions: nothing is downloaded without an explicit Install.
 - **macOS.** The helper is signed and notarized like the app. Files the app downloads with its own code don't get macOS's quarantine attribute; signing still matters for the hardened runtime and Gatekeeper.
 - **Development and tests.** The app looks for the helper in this order: a path in an environment variable, a binary next to its own executable (where `cargo build` puts it), then the installed copy. DuckDB integration tests live in `crates/engine-duckdb/tests/`, where Cargo provides the built helper as `CARGO_BIN_EXE_tableplus-duckdb`, so tests never download anything. Setting `default-members = ["crates/core", "crates/app"]` in the workspace keeps a plain `cargo build` from compiling DuckDB's C++ (64 to 87 s cold, section 3).
 
@@ -576,11 +599,11 @@ crates/
 
 ### Phases
 
-1. **Helper, then connect and browse.** `Serialize` for the result and explain types, `crates/driver-host`, `RemoteConnection`, the path-to-helper map, the helper lookup for development and tests, and `default-members` (section 7). Measure the pipe cost on the shop data and the 50-million-row read, then fix the message format. `DriverKind::DuckDb`, `Dialect::DuckDb`, `Flavor::DuckDb` and their match arms. The driver in `crates/engine-duckdb`, with `try_clone` per session, statement counting through `ffi`, streaming reads, `Count` and `Success` results, and value formatting with the cast fallback for TIMETZ, TIME_NS, BIT, BIGNUM and VARIANT. Catalog for the current database, cancel, the connection dialog (file, read-only, `:memory:`), the seed, `make_duckdb`, the fixture and `crates/engine-duckdb/tests/`. About 1,700 lines.
+1. **Helper, then connect and browse.** `Serialize` for the result and explain types, `crates/driver-host`, `RemoteConnection`, the path-to-helper map, the helper lookup for development and tests, and `default-members` (section 7). Measure the pipe cost on the shop data and the 50-million-row read, then fix the message format. `DriverKind::DuckDb`, `Dialect::DuckDb`, `Flavor::DuckDb` and their match arms. The driver in `crates/engine-duckdb`, with `try_clone` per session, statement counting through `ffi`, streaming reads, `Count` and `Success` results, and value formatting with the cast fallback for TIMETZ, TIME_NS, BIT, BIGNUM and VARIANT. Catalog for the current database, cancel, the two-step engine picker and the connection dialog (file, read-only, `:memory:`), the seed, `make_duckdb`, the fixture and `crates/engine-duckdb/tests/`. About 1,700 lines.
 2. **Edit.** DuckDB arms in `dialect.rs` (the `from_hex` literal), `sqlgen.rs` (`ESCAPE '\'`) and `alter.rs` (Postgres-like, with the index and foreign-key limits surfaced or a rebuild), structure-view gating, and `exercise_editing` against DuckDB. About 400 lines.
 3. **Explain.** Request rules and the read-only recipe, the JSON parser with time scaling, `unestimated` and access rules, sections in `docs/query-plans.md` and `DECISIONS.md`, `plan_fixtures`, and the lab target. About 800 lines.
 4. **Install on demand.** The engine list with versions, addresses and hashes, the download with progress and hash check, the Install action in the connection dialog, the Settings list with update and remove, "Install from file", and CI jobs that build, sign and notarize the helper for each platform and publish it. About 400 lines plus CI.
-5. **DuckDB extras.** The ATTACH list and two-level sidebar, config options, Parquet export and `read_csv` import, progress, an extensions policy, and MotherDuck. Each is optional and separate.
+5. **DuckDB extras.** Opening a Parquet, CSV or JSON file directly as an in-memory connection (section 4; it needs only phase 1, so it can ship right after it), the ATTACH list and two-level sidebar, config options, Parquet export and `read_csv` import, progress, an extensions policy, and MotherDuck. Each is optional and separate.
 
 ### Open questions for Koen
 

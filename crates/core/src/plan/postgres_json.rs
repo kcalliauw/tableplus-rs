@@ -71,7 +71,7 @@ fn parse_text(text: &str) -> Result<Plan, String> {
 }
 
 /// The deepest nesting of arrays and objects in `text`, outside strings.
-fn json_depth(text: &str) -> usize {
+pub(super) fn json_depth(text: &str) -> usize {
     let (mut depth, mut deepest, mut in_string, mut escaped) = (0usize, 0, false, false);
     for b in text.bytes() {
         match b {

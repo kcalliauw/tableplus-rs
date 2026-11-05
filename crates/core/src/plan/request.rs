@@ -137,7 +137,10 @@ const MYSQL_JSON_V2: Version = Version::new(8, 4, 0);
 const SQLITE_SCAN_STATUS: Version = Version::new(3, 42, 0);
 
 use ExplainMode::{Analyze, Estimate};
-use Flavor::{ClickHouse, MariaDb, MySql, Postgres, Sqlite};
+use Flavor::{ClickHouse, DuckDb, MariaDb, MySql, Postgres, Sqlite};
+
+/// The prefix of DuckDB's Explain Analyze, which the helper strips to check the statement itself.
+pub const DUCKDB_ANALYZE: &str = "EXPLAIN (ANALYZE, FORMAT JSON) ";
 
 const RULES: &[Rule] = &[
     wrap(MySql, Estimate, ANY, "EXPLAIN FORMAT=JSON ", PlanFormat::MySqlJson),
@@ -158,6 +161,8 @@ const RULES: &[Rule] = &[
         since: SQLITE_SCAN_STATUS,
         recipe: Recipe::Measure(PlanFormat::SqliteScanStatus),
     },
+    wrap(DuckDb, Estimate, ANY, "EXPLAIN (FORMAT JSON) ", PlanFormat::DuckDbJson),
+    wrap(DuckDb, Analyze, ANY, DUCKDB_ANALYZE, PlanFormat::DuckDbJson),
     wrap(ClickHouse, Estimate, ANY, "EXPLAIN indexes = 1 ", PlanFormat::ClickHouseText),
     unsupported(
         ClickHouse,
@@ -203,8 +208,11 @@ pub fn request(server: &ServerInfo, sql: &str, mode: ExplainMode) -> Result<Expl
             "Explain Analyze runs the statement, and it can't check what a /*! … */ comment adds to it.".into(),
         ));
     }
+    if mode == Analyze && server.flavor == DuckDb && matches!(shape.verb.as_str(), "PIVOT" | "UNPIVOT") {
+        return Err(Unsupported(format!("DuckDB returns no profile for {}. Explain it without Analyze.", shape.verb)));
+    }
     if mode == Analyze
-        && let Some(write) = shape.writes()
+        && let Some(write) = shape.writes(server.flavor)
     {
         return Err(Unsupported(format!("Explain Analyze runs the statement, and this {write} would change data.")));
     }
@@ -375,15 +383,23 @@ impl StatementShape {
                 Some("SQLite's EXPLAIN lists bytecode, not a plan. Explain the statement without it.")
             }
             (ClickHouse, "DESCRIBE") => Some("The statement lists a table's columns, so it has no plan to explain."),
+            (DuckDb, "DESCRIBE" | "SHOW") => {
+                Some("The statement lists a table's columns, so it has no plan to explain.")
+            }
             _ => None,
         }
     }
 
     /// The keyword that makes running the statement change data, if it would.
-    fn writes(&self) -> Option<String> {
+    fn writes(&self, flavor: Flavor) -> Option<String> {
         const QUERY: &[&str] = &["SELECT", "TABLE", "VALUES", "WITH"];
-        if let Some(cte) = self.cte_verbs.iter().find(|v| !QUERY.contains(&v.as_str())) {
+        // DuckDB's FROM-first SELECT and SUMMARIZE only read.
+        let duckdb_query = |v: &str| flavor == DuckDb && matches!(v, "FROM" | "SUMMARIZE");
+        if let Some(cte) = self.cte_verbs.iter().find(|v| !QUERY.contains(&v.as_str()) && !duckdb_query(v)) {
             return Some(cte.clone());
+        }
+        if duckdb_query(&self.verb) {
+            return None;
         }
         if self.select_into {
             return Some("SELECT … INTO".into());
@@ -408,6 +424,7 @@ mod tests {
     const POSTGRES: ServerInfo = ServerInfo::new(Postgres, Version::new(17, 6, 0));
     const SQLITE: ServerInfo = ServerInfo::new(Sqlite, Version::new(3, 53, 2)).with_scan_status(true);
     const CLICKHOUSE: ServerInfo = ServerInfo::new(ClickHouse, Version::new(25, 8, 33));
+    const DUCKDB: ServerInfo = ServerInfo::new(DuckDb, Version::new(1, 5, 6));
 
     fn explain(server: ServerInfo, sql: &str, mode: ExplainMode) -> Result<String, String> {
         request(&server, sql, mode).map(|r| r.explain.sql().to_string()).map_err(|e| e.0)
@@ -433,6 +450,8 @@ mod tests {
             ),
             (SQLITE, Estimate, "EXPLAIN QUERY PLAN select * from orders", PlanFormat::SqliteQueryPlan),
             (CLICKHOUSE, Estimate, "EXPLAIN indexes = 1 select * from orders", PlanFormat::ClickHouseText),
+            (DUCKDB, Estimate, "EXPLAIN (FORMAT JSON) select * from orders", PlanFormat::DuckDbJson),
+            (DUCKDB, Analyze, "EXPLAIN (ANALYZE, FORMAT JSON) select * from orders", PlanFormat::DuckDbJson),
         ] {
             let r = request(&server, q, mode).unwrap_or_else(|e| panic!("{server} {mode:?}: {e}"));
             assert_eq!(r.explain, Explain::Statement(expected.into()), "{server} {mode:?}");
@@ -478,7 +497,7 @@ mod tests {
 
     #[test]
     fn every_engine_has_a_rule_for_every_version() {
-        for flavor in [MySql, MariaDb, Postgres, Sqlite, ClickHouse] {
+        for flavor in [MySql, MariaDb, Postgres, Sqlite, ClickHouse, DuckDb] {
             for mode in [Estimate, Analyze] {
                 assert!(
                     RULES.iter().any(|r| r.flavor == flavor && r.mode == mode && r.since == ANY),
@@ -486,6 +505,44 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn duckdb_rules() {
+        let r = request(&DUCKDB, "from orders limit 1", Analyze).unwrap();
+        assert_eq!(r.explain.sql(), "EXPLAIN (ANALYZE, FORMAT JSON) from orders limit 1");
+        assert_eq!(
+            (r.setup.as_slice(), r.reset.as_slice()),
+            (&["BEGIN TRANSACTION READ ONLY".to_string()][..], &["ROLLBACK".to_string()][..])
+        );
+        assert!(r.needs_idle_session);
+        assert!(explain(DUCKDB, "summarize orders", Analyze).is_ok());
+        assert!(explain(DUCKDB, "with x as (from orders) select * from x", Analyze).is_ok());
+        assert!(
+            explain(DUCKDB, "pivot orders on status using count(*)", Analyze)
+                .unwrap_err()
+                .contains("no profile for PIVOT")
+        );
+        assert!(explain(DUCKDB, "pivot orders on status using count(*)", Estimate).is_ok());
+        for write in [
+            "copy orders to 'x.csv'",
+            "insert into t values (1)",
+            "attach 'x.db'",
+            "install icu",
+            "load icu",
+            "call f()",
+            "pragma version",
+            "set threads = 1",
+            "export database 'd'",
+        ] {
+            let why = explain(DUCKDB, write, Analyze).unwrap_err();
+            assert!(why.contains("would change data"), "{write}: {why}");
+        }
+        assert!(explain(DUCKDB, "describe orders", Estimate).unwrap_err().contains("columns"));
+        assert!(explain(DUCKDB, "show tables", Estimate).unwrap_err().contains("columns"));
+        assert!(asks_for_plan(&DUCKDB, "explain analyze select 1"));
+        assert!(asks_for_plan(&DUCKDB, "EXPLAIN (FORMAT JSON) from orders"));
+        assert!(!asks_for_plan(&DUCKDB, "describe orders"));
     }
 
     #[test]

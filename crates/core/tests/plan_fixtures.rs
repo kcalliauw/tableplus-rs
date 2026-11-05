@@ -132,10 +132,50 @@ const CASES: &[Case] = &[
             (1, "Search", Some("m")),
         ],
     },
+    Case {
+        file: "duckdb-1.5.6-join.json",
+        output: include_str!("fixtures/explain/duckdb-1.5.6-join.json"),
+        server: server(Flavor::DuckDb, 1, 5, 6),
+        format: PlanFormat::DuckDbJson,
+        nodes: 5,
+        root: "TOP_N",
+        total_ms: None,
+        steps: &[
+            (2, "HASH_JOIN", None),
+            (3, "SEQ_SCAN", Some("shop.main.orders")),
+            (3, "SEQ_SCAN", Some("shop.main.users")),
+        ],
+    },
+    Case {
+        file: "duckdb-1.5.6-window-analyze.json",
+        output: include_str!("fixtures/explain/duckdb-1.5.6-window-analyze.json"),
+        server: server(Flavor::DuckDb, 1, 5, 6),
+        format: PlanFormat::DuckDbJson,
+        nodes: 13,
+        root: "Query",
+        total_ms: Some(0.002688625 * 1000.0),
+        steps: &[
+            (2, "ORDER_BY", None),
+            (5, "HASH_GROUP_BY", None),
+            (8, "HASH_JOIN", None),
+            (9, "SEQ_SCAN", Some("shop.main.users")),
+            (9, "HASH_GROUP_BY", None),
+            (11, "SEQ_SCAN", Some("shop.main.orders")),
+        ],
+    },
 ];
 
-/// The server's result: one text cell, or for SQLite the tab-separated rows under their header.
+/// The server's result: one text cell, DuckDB's key and value, or for SQLite the tab-separated
+/// rows under their header.
 fn result(case: &Case) -> ResultSet {
+    if case.server.flavor == Flavor::DuckDb {
+        let key = if case.output.starts_with('[') { "physical_plan" } else { "analyzed_plan" };
+        return ResultSet {
+            columns: vec![ColumnMeta::new("explain_key", "VARCHAR"), ColumnMeta::new("explain_value", "VARCHAR")],
+            rows: vec![vec![Value::text(key), Value::text(case.output)].into()],
+            truncated: false,
+        };
+    }
     if case.server.flavor != Flavor::Sqlite {
         return ResultSet {
             columns: vec![ColumnMeta::new("EXPLAIN", "")],
@@ -184,4 +224,19 @@ fn mysql_tree_reads_times_in_exponent_notation() {
     assert_eq!(actual.time.map(|t| (t.first_row_ms, t.last_row_ms)), Some((Some(312e-6), 458e-6)));
     assert_eq!(plan.inclusive_ms(id), Some(2.0 * 458e-6));
     assert_eq!(scan.estimate.map(|e| e.rows), Some(2.0));
+}
+
+#[test]
+fn duckdb_profile_keeps_shares_of_thread_time() {
+    let case = CASES.iter().find(|c| c.file == "duckdb-1.5.6-window-analyze.json").unwrap();
+    let plan = plan::parse(&case.server, &result(case)).unwrap().unwrap();
+    // 2.96 ms of thread time over 2.69 ms of statement time: every step is scaled by 0.907.
+    let (scan, _) = plan.nodes().find(|(_, n)| n.object.as_deref() == Some("shop.main.orders")).unwrap();
+    let scale = 0.002688625 / 0.002964407999999999;
+    assert!((plan.inclusive_ms(scan).unwrap() - 0.000240332 * 1000.0 * scale).abs() < 1e-6);
+    let (projection, _) = plan.nodes().nth(1).unwrap();
+    assert_eq!(plan.estimated_rows(projection), None, "the 0 above ORDER_BY is a placeholder");
+    let (join, _) = plan.nodes().find(|(_, n)| n.operation == "HASH_JOIN").unwrap();
+    assert_eq!(plan.estimated_rows(join), Some(2091.0));
+    assert!(!plan.is_misestimated(join), "5,000 rows against 2,091 is within the factor");
 }

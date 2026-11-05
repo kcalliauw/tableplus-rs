@@ -94,6 +94,15 @@ impl Plan {
                     FactKind::Triggers
                 }
                 (PlanFormat::MariaDbJson, "query_optimization.r_total_time_ms") => FactKind::Optimization,
+                // Seconds; `planner` and `physical_planner` appear with `profiling_mode = 'detailed'`.
+                (PlanFormat::DuckDbJson, "latency") => {
+                    add(FactKind::Execution, value * 1000.0);
+                    continue;
+                }
+                (PlanFormat::DuckDbJson, "planner" | "physical_planner") => {
+                    add(FactKind::Planning, value * 1000.0);
+                    continue;
+                }
                 _ => continue,
             };
             add(kind, value);

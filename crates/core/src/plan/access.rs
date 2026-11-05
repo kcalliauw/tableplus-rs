@@ -156,6 +156,7 @@ impl Plan {
             }
             PlanFormat::PostgresJson => postgres_access(node),
             PlanFormat::SqliteQueryPlan | PlanFormat::SqliteScanStatus => self.sqlite_access(node),
+            PlanFormat::DuckDbJson => duckdb_access(node),
             PlanFormat::ClickHouseText => None,
         }
     }
@@ -176,7 +177,7 @@ impl Plan {
                     || (matches!(op, "Union" | "Recursive union") && node.reads_internal_name())
             }
             PlanFormat::SqliteQueryPlan | PlanFormat::SqliteScanStatus => op == "Materialize",
-            PlanFormat::PostgresJson | PlanFormat::ClickHouseText => false,
+            PlanFormat::PostgresJson | PlanFormat::ClickHouseText | PlanFormat::DuckDbJson => false,
         };
         if temp {
             extras.push(Extra::TempTable);
@@ -256,6 +257,26 @@ fn postgres_access(node: &PlanNode) -> Option<Access> {
         "Function Scan" | "Table Function Scan" | "Values Scan" => Access::Constant,
         "Result" if node.children.is_empty() => Access::Constant,
         "CTE Scan" | "WorkTable Scan" | "Subquery Scan" | "Named Tuplestore Scan" => Access::InternalResult,
+        _ => return None,
+    })
+}
+
+/// DuckDB names a table scan `SEQ_SCAN` whether or not it used an index; its `Type` says which.
+/// Table functions such as `READ_PARQUET` scan a whole file, and the `*_SCAN` steps over CTEs,
+/// delim joins and buffered chunks read back a result built in the same plan.
+fn duckdb_access(node: &PlanNode) -> Option<Access> {
+    let op = node.operation.as_str();
+    Some(match op {
+        "SEQ_SCAN" | "TABLE_SCAN" => match node.access_type.as_deref() {
+            Some("Index Scan") => Access::Range,
+            _ => Access::FullScan,
+        },
+        "READ_CSV" | "READ_CSV_AUTO" | "READ_PARQUET" | "PARQUET_SCAN" | "READ_JSON" | "READ_JSON_AUTO" => {
+            Access::FullScan
+        }
+        "COLUMN_DATA_SCAN" | "DELIM_SCAN" | "CTE_SCAN" | "REC_CTE_SCAN" | "CHUNK_SCAN" => Access::InternalResult,
+        "DUMMY_SCAN" | "EMPTY_RESULT" | "EXPRESSION_SCAN" => Access::Constant,
+        _ if node.object.is_some() && node.children.is_empty() => Access::FullScan,
         _ => return None,
     })
 }

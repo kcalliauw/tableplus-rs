@@ -143,6 +143,27 @@ pub fn batches(conn: &Conn, sql: &str, batch: usize, emit: &mut Emit<'_>) -> Res
     })
 }
 
+/// Whether the connection has a transaction open. The C API doesn't say, but outside a
+/// transaction every statement runs in a new one, so two reads of `txid_current()` differ.
+pub fn in_transaction(conn: &Conn) -> Result<bool> {
+    let txid = || match collect(conn, "SELECT txid_current()", Some(1)) {
+        Ok(StatementResult::Rows(rs)) => Ok(rs.rows.first().map(|r| r[0].clone())),
+        Ok(StatementResult::Affected(_)) => Ok(None),
+        Err(e) => Err(e),
+    };
+    match (txid(), txid()) {
+        (Ok(first), Ok(second)) => Ok(first == second),
+        // An aborted transaction refuses every statement until it is rolled back.
+        (Err(e), _) | (_, Err(e)) if format!("{e:#}").contains("transaction is aborted") => Ok(true),
+        (Err(e), _) | (_, Err(e)) => Err(e),
+    }
+}
+
+/// The type DuckDB gives the single statement in `sql`, prepared without running it.
+pub fn statement_type(conn: &Conn, sql: &str) -> Result<StatementType> {
+    Ok(conn.prepare(sql)?.statement_type())
+}
+
 /// The number of statements in `sql`, counted by DuckDB's parser without running any.
 pub fn statement_count(conn: &Conn, sql: &str) -> Result<usize> {
     Ok(conn.extract(sql)?.len())

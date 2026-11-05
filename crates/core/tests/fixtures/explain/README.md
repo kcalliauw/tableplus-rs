@@ -2,7 +2,7 @@
 
 Plan output from server versions the Docker stack in `docker/compose.yml` doesn't run, read by `tests/plan_fixtures.rs`. Each file is the server's output unchanged, apart from surrounding whitespace. The SQLite file holds the `EXPLAIN QUERY PLAN` rows as tab-separated columns under a header.
 
-They were captured from the Northwind sample database by the EXPLAIN lab (`tableplus-rs-explain-lab`). The plans hold table and column names, row estimates and the constants of the lab's queries, but no rows of data. Northwind is distributed under the Microsoft Public License (Ms-PL), from https://github.com/pthom/northwind_psql.
+They were captured from the Northwind sample database by the EXPLAIN lab (`tableplus-rs-explain-lab`), except the DuckDB files, which come from the shop seed (`docker/seed/duckdb.sql`) through `tableplus-duckdb`, because the lab has no DuckDB target yet. The plans hold table and column names, row estimates and the constants of the lab's queries, but no rows of data. Northwind is distributed under the Microsoft Public License (Ms-PL), from https://github.com/pthom/northwind_psql.
 
 | file | server | statement |
 |---|---|---|
@@ -12,3 +12,5 @@ They were captured from the Northwind sample database by the EXPLAIN lab (`table
 | `mariadb-10.6-dml.json` | MariaDB 10.6.28 | `EXPLAIN FORMAT=JSON` of the UPDATE |
 | `postgres-12-dml.json` | PostgreSQL 12.22 | `EXPLAIN (FORMAT JSON)` of the UPDATE |
 | `sqlite-3.53-modern-query-plan.tsv` | SQLite 3.53.2 | `EXPLAIN QUERY PLAN` of the recursive CTE query |
+| `duckdb-1.5.6-join.json` | DuckDB 1.5.6 | `EXPLAIN (FORMAT JSON)` of a join with two filters and a top-N, the `explain_value` cell |
+| `duckdb-1.5.6-window-analyze.json` | DuckDB 1.5.6 | `EXPLAIN (ANALYZE, FORMAT JSON)` of a row_number CTE joined and grouped, the `explain_value` cell |

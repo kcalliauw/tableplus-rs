@@ -160,6 +160,26 @@ the loops, rows visited, estimate and counter ticks of each `EXPLAIN QUERY PLAN`
 - **Times are shares of ticks.** SQLite doesn't time steps. A step's time is its share of the
   statement's ticks, scaled to the time spent in `sqlite3_step`, and the plan's format says so.
 
+## DuckDB in a helper program
+
+DuckDB adds 31 to 34 MB to a binary, so it runs in `tableplus-duckdb`, a separate program the app
+starts and talks to over a pipe, instead of inside the app (`docs/duckdb-research.md`, section 7).
+
+- **One process per database file.** DuckDB lets one process open a file read-write, so every
+  session on a file, the Test button included, shares one helper; each session is a connection on
+  its one database. In-memory and data-file connections get a helper of their own.
+- **postcard on the pipe.** Measured against JSON on the shop data and a 50-million-row read, JSON
+  was 2 to 3 times slower and can't carry NaN or infinite floats. Postcard adds 5% to the 50M read.
+- **The C API, not the `duckdb` crate.** The crate keeps the connection and statement handles
+  private, which statement counting, statement types and interrupts need, and its streaming
+  iterator panics when a fetch fails, as an interrupted one does.
+- **DuckDB renders its own values.** Numbers, text and blobs are read from DuckDB's vectors; every
+  other type is cast to VARCHAR by wrapping the statement in a projection with positional
+  references, so cells read exactly as DuckDB's own clients print them.
+- **Times are shares of thread time.** DuckDB's per-operator times are summed over threads. They
+  are scaled to the statement's latency, the way SQLite's cycles are scaled to its step time, and
+  the plan's format says so.
+
 ## Scope cuts
 
 - **Redis and MongoDB** (stretch goals) were not implemented. They aren't relational: they need a key

@@ -2,6 +2,7 @@
 //! server for a plan ([`request()`]), and the parsers that read its output ([`parse`]).
 
 mod access;
+mod duckdb_json;
 mod facts;
 mod mariadb_json;
 mod mysql_json;
@@ -13,7 +14,7 @@ mod sqlite_scanstatus;
 
 pub use access::{Access, Extra};
 pub use facts::{FactKind, FactValue, PlanFact, Trigger};
-pub use request::{Explain, ExplainMode, ExplainStatements, Unsupported, asks_for_plan, request};
+pub use request::{DUCKDB_ANALYZE, Explain, ExplainMode, ExplainStatements, Unsupported, asks_for_plan, request};
 pub(crate) use sqlite_scanstatus::{COLUMNS as SQLITE_SCAN_STATUS_COLUMNS, STATEMENT_ID as SQLITE_STATEMENT_ID};
 
 use crate::model::ResultSet;
@@ -50,6 +51,9 @@ pub enum PlanFormat {
     SqliteScanStatus,
     /// ClickHouse `EXPLAIN` text, one line per row. There is no parser for it.
     ClickHouseText,
+    /// DuckDB `EXPLAIN [ANALYZE] (FORMAT JSON)`. Measured times are thread time, scaled so the
+    /// steps add up to the statement's own time.
+    DuckDbJson,
 }
 
 impl PlanFormat {
@@ -63,6 +67,7 @@ impl PlanFormat {
             PlanFormat::SqliteQueryPlan => "SQLite query plan",
             PlanFormat::SqliteScanStatus => "SQLite scan status (times from CPU cycles)",
             PlanFormat::ClickHouseText => "ClickHouse text",
+            PlanFormat::DuckDbJson => "DuckDB JSON (measured times are shares of thread time)",
         }
     }
 }
@@ -329,6 +334,7 @@ const PARSERS: &[Parser] = &[
     postgres_json::parse,
     sqlite_eqp::parse,
     sqlite_scanstatus::parse,
+    duckdb_json::parse,
 ];
 
 /// Reads a statement's result as a query plan. `None` when the result isn't a plan in a format
@@ -359,6 +365,12 @@ fn strip_outer_parens(text: &str) -> &str {
 /// A result as plain text: the values of a one-column result line by line, otherwise aligned
 /// columns under a header.
 pub fn raw_text(result: &ResultSet) -> String {
+    // DuckDB's hand-typed EXPLAIN: the plan is in `explain_value`, its key says which plan it is.
+    if result.columns.len() == 2 && result.columns[0].name == "explain_key" && result.columns[1].name == "explain_value"
+    {
+        let plans = result.rows.iter().filter_map(|r| r[1].to_text());
+        return plans.collect::<Vec<_>>().join("\n\n");
+    }
     let cells: Vec<Vec<String>> = result
         .rows
         .iter()

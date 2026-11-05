@@ -489,3 +489,58 @@ async fn duckdb_edits_duckdb_values() {
     assert!(alter_statements(D, "main", "notes", &n, &[drop]).is_err());
     assert!(!D.drops_constraints());
 }
+
+/// Delivered orders from Britain: a join, two filters and a top-N.
+const JOIN: &str = "SELECT u.full_name, o.id, o.total FROM orders o JOIN users u ON u.id = o.user_id \
+                    WHERE o.status = 'delivered' AND u.country = 'GB' ORDER BY o.total DESC LIMIT 10";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn duckdb_explain_plans() {
+    use tableplus_core::plan::{self, ExplainMode};
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = duckdb_fixture(dir.path()).await;
+    let conn = connect(&cfg).await;
+    exercise_explain(&conn, JOIN, "UPDATE orders SET total = 0", "SELECT count(*), sum(total) FROM orders").await;
+    exercise_explain_one_statement(&conn, "SET threads = 3", "SELECT current_setting('threads')").await;
+    exercise_explain_in_transaction(&conn, "BEGIN", "CREATE TABLE IF NOT EXISTS explain_touch (a INTEGER)").await;
+
+    let estimate = explain(&conn, JOIN, ExplainMode::Estimate).await;
+    assert_eq!(estimate.node(plan::NodeId::ROOT).operation, "TOP_N");
+    let scans: Vec<_> = estimate.nodes().filter(|(_, n)| n.operation == "SEQ_SCAN").collect();
+    assert_eq!(scans.len(), 2);
+    assert!(scans.iter().all(|(id, n)| estimate.access(*id) == Some(plan::Access::FullScan) && n.object.is_some()));
+    assert!(scans.iter().any(|(_, n)| n.condition.as_deref() == Some("country='GB'")), "{scans:#?}");
+
+    let analyzed = explain(&conn, JOIN, ExplainMode::Analyze).await;
+    assert_eq!(analyzed.node(plan::NodeId::ROOT).operation, "Query");
+    let latency: f64 = analyzed.attributes.iter().find(|a| a.key == "latency").unwrap().value.parse().unwrap();
+    assert!((analyzed.total_ms().unwrap() - latency * 1000.0).abs() < 1e-6, "the root is the statement's time");
+    let top = analyzed.children(plan::NodeId::ROOT)[0];
+    assert!(analyzed.inclusive_ms(top).unwrap() <= latency * 1000.0 + 1e-6, "thread time is scaled down to it");
+    assert_eq!(analyzed.node(top).actual.unwrap().rows, Some(10.0));
+    assert!(analyzed.facts().iter().any(|f| f.kind == plan::FactKind::Execution));
+
+    // FROM-first and SUMMARIZE are queries; the read-only transaction stops a sequence advancing.
+    explain(&conn, "FROM orders LIMIT 5", ExplainMode::Analyze).await;
+    explain(&conn, "SUMMARIZE orders", ExplainMode::Analyze).await;
+    let sequence = "SELECT currval('users_id_seq')";
+    let before = rows(&conn, sequence).await.rows;
+    let req = plan::request(&conn.server_info(), "SELECT nextval('users_id_seq')", ExplainMode::Analyze).unwrap();
+    let err = format!("{:#}", conn.explain(&req).await.unwrap_err());
+    assert!(err.contains("read-only"), "{err}");
+    assert_eq!(rows(&conn, sequence).await.rows, before, "nextval never ran");
+    // A write the statement check didn't catch is stopped by DuckDB's statement type.
+    let mut sneaky = plan::request(&conn.server_info(), "SELECT 1", ExplainMode::Analyze).unwrap();
+    sneaky.explain = tableplus_core::plan::Explain::Statement(format!("{}DELETE FROM audit_log", plan::DUCKDB_ANALYZE));
+    let err = format!("{:#}", conn.explain(&sneaky).await.unwrap_err());
+    assert!(err.contains("not a query"), "{err}");
+    assert_eq!(count(&conn, "main", "audit_log", None).await, 100);
+
+    // A hand-typed EXPLAIN comes back as rows the plan views read.
+    let typed = rows(&conn, &format!("EXPLAIN (FORMAT JSON) {JOIN}")).await;
+    assert!(plan::asks_for_plan(&conn.server_info(), &format!("EXPLAIN (FORMAT JSON) {JOIN}")));
+    assert!(plan::parse(&conn.server_info(), &typed).unwrap().is_ok());
+    let boxes = rows(&conn, &format!("EXPLAIN {JOIN}")).await;
+    assert!(plan::parse(&conn.server_info(), &boxes).is_none());
+    assert!(plan::raw_text(&boxes).contains("HASH_JOIN") && !plan::raw_text(&boxes).starts_with("explain_key"));
+}

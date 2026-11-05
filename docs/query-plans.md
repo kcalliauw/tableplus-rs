@@ -13,6 +13,7 @@ How tableplus-rs asks each engine for a plan and reads the answer into one model
 | PostgreSQL | `EXPLAIN (FORMAT JSON)` | `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` |
 | SQLite before 3.42 | `EXPLAIN QUERY PLAN` | the estimate, with a note |
 | SQLite 3.42 and later | `EXPLAIN QUERY PLAN` | the statement itself, measured through `sqlite3_stmt_scanstatus_v2` |
+| DuckDB | `EXPLAIN (FORMAT JSON)` | `EXPLAIN (ANALYZE, FORMAT JSON)` |
 
 On MySQL 8.4 and later, a setup statement saves the session's `explain_json_format_version` in `@tableplus_explain_json_format` and sets it to 2, and a reset statement puts it back.
 
@@ -21,7 +22,9 @@ Explain Analyze runs the statement read-only, so a function that writes, such as
 - **PostgreSQL** runs it in `BEGIN READ ONLY` and rolls back, which also undoes writes to temporary tables.
 - **MySQL and MariaDB** turn on `transaction_read_only` (MariaDB before 11.1: `tx_read_only`) and turn off `autocommit`, so the statement opens a read-only transaction. `ROLLBACK AND NO CHAIN NO RELEASE` then undoes writes to InnoDB temporary tables, whatever `completion_type` says, and both settings are put back. `START TRANSACTION` isn't used because it would release `LOCK TABLES` locks.
 
-Neither reaches a transaction the session already has open, so with one open, Explain Analyze asks the user to commit or roll back.
+- **DuckDB** runs it in `BEGIN TRANSACTION READ ONLY` and rolls back. That refuses `nextval` and writes to attached databases, and undoes writes to temporary tables, but still lets `COPY … TO` write a file, which the statement check refuses.
+
+None reaches a transaction the session already has open, so with one open, Explain Analyze asks the user to commit or roll back. DuckDB has no call that says whether a transaction is open, and a failed `BEGIN` inside one aborts it, so the DuckDB helper reads `txid_current()` twice first: outside a transaction each statement runs in a new one and the ids differ.
 
 Explain Analyze doesn't block effects that outlast the statement:
 
@@ -33,7 +36,7 @@ Explain overwrites a session's own user variables `@tableplus_explain_read_only`
 
 `Connection::explain` runs the setup, the plan request and the reset while it holds the connection, so no other statement on that connection runs in between. The reset runs even when the plan request fails, and a failed reset statement is reported with the plan.
 
-Explain Analyze shows the estimate instead of running anything but a query. The check reads the statement's keywords: only a `SELECT`, `TABLE` or `VALUES` statement runs, after `WITH` clauses that are queries themselves, and never a `SELECT … INTO` or `TABLE … INTO`. On SQLite the driver also refuses a statement that `sqlite3_stmt_readonly` reports as writing.
+Explain Analyze shows the estimate instead of running anything but a query. The check reads the statement's keywords: only a `SELECT`, `TABLE` or `VALUES` statement runs, after `WITH` clauses that are queries themselves, and never a `SELECT … INTO` or `TABLE … INTO`. On SQLite the driver also refuses a statement that `sqlite3_stmt_readonly` reports as writing. On DuckDB a FROM-first query (`FROM orders`) and `SUMMARIZE` also run, PIVOT and UNPIVOT get the estimate because DuckDB returns no profile for them, and the helper requires DuckDB's own SELECT statement type for the statement inside the request.
 
 The check has to read the statement the way the server does:
 
@@ -50,6 +53,7 @@ The check has to read the statement the way the server does:
 - **MariaDB JSON** holds a `query_block`. From 10.11 on a join is a `nested_loop` array; in 10.6 it is a run of repeated `table` keys in one object, so objects are read with duplicate keys kept, in order.
 - **PostgreSQL JSON** is an array with one object per statement. Each has a `Plan` tree, whose children sit in `Plans`, beside plan-wide values such as `Planning Time` and `Triggers`. Below a `Gather`, each worker and the leader counts as a loop, so a step's total time is divided by the processes that ran it. Plans parse up to 256 JSON levels deep, enough for a 100-table join.
 - **SQLite's query plan** is one row per step, with `id`, `parent`, `notused` and `detail`. It has no estimates and no actuals.
+- **DuckDB JSON** comes in two columns, `explain_key` and `explain_value`. An estimate (`physical_plan`) is an array of operators with `name`, `extra_info` and `children`; several roots get a `Query` node above them. A profile (`analyzed_plan`) is an object with the statement's metrics, such as `latency`, and the operator tree; it becomes a `Query` root holding those metrics, and DuckDB's own `EXPLAIN_ANALYZE` operator is left out. A hand-typed `EXPLAIN` without a format returns box-drawing text, which the raw view shows without the key column.
 - **SQLite's scan status** is what the driver returns for a measured run: a row for the statement, with the rows it returned and the time spent in `sqlite3_step`, then one per plan step with SQLite's `NLOOP`, `NVISIT`, `EST` and `NCYCLE`.
 
 A parser claims a result by its shape, not by which button ran it. A Run result opens as a plan only when its statement asks for one (`EXPLAIN`, `DESCRIBE`, or MariaDB's `ANALYZE` and `SHOW EXPLAIN`), so a query that returns plan-shaped JSON stays rows. A format without a parser shows the server's raw text. Three look-alikes stay rows: `DESCRIBE orders` on MySQL and MariaDB lists the table's columns, MariaDB's `ANALYZE TABLE` updates statistics, and SQLite's `EXPLAIN` without `QUERY PLAN` lists bytecode.
@@ -71,6 +75,10 @@ Every MariaDB time is a total over all of a step's loops. The [ANALYZE FORMAT=JS
 - A sort's `r_total_time_ms` covers the table it reads directly, but not a temporary table: the join fills that before the sort starts, so the join's time is added on top.
 
 Each step's total over its loops, children included, is divided by its `r_loops`. Because `r_other_time_ms` is billed by gaps between timers, the parts of a block can add up to slightly more than the block's own total, and the block's self time then stays at zero.
+
+### DuckDB
+
+A profile's per-operator `cpu_time` is the operator's time plus its children's, summed over every thread that ran them ([query_profiler.cpp](https://github.com/duckdb/duckdb/blob/v1.5.6/src/main/query_profiler.cpp#L402-L414)), so a parallel plan's root claims more time than the statement took. Every time is multiplied by the statement's `latency` over its `cpu_time`, so the `Query` root equals the measured statement time and each step keeps its share of thread time; the format reads "DuckDB JSON (measured times are shares of thread time)". DuckDB counts no loops and no first-row times, and reports no costs, so cost bars stay empty. It prints an estimate of 0 on the step above one it doesn't estimate, such as the projection over an `ORDER_BY`; that reads as no estimate. `EXPLAIN_ANALYZE`, `DELIM_SCAN` and the delim joins report 0 rows while rows flow through their children, so their rows count as unknown. `SEQ_SCAN` is a full scan unless its `Type` is `Index Scan`; table functions such as `READ_PARQUET` are full scans of a file, and `COLUMN_DATA_SCAN`, `DELIM_SCAN` and the CTE scans read back a result built in the same plan.
 
 ### SQLite
 
@@ -95,4 +103,4 @@ Two other rules were tried. Scaling each step to the top of its own cost region 
 
 ## Tests
 
-`crates/core/tests/postgres.rs`, `mysql.rs` and `sqlite.rs` explain and analyze statements on the Docker stack and the SQLite seed. `sqlite_analyze.rs` checks measured runs against `EXPLAIN QUERY PLAN` and the statement's rows. `plan_fixtures.rs` parses six captured plans from server versions the stack doesn't run, kept in `crates/core/tests/fixtures/explain/`.
+`crates/core/tests/postgres.rs`, `mysql.rs` and `sqlite.rs` explain and analyze statements on the Docker stack and the SQLite seed. `sqlite_analyze.rs` checks measured runs against `EXPLAIN QUERY PLAN` and the statement's rows. `plan_fixtures.rs` parses six captured plans from server versions the stack doesn't run, and two DuckDB plans from the shop seed, kept in `crates/core/tests/fixtures/explain/`. `crates/engine-duckdb/tests/duckdb.rs` explains and analyzes through the DuckDB helper.

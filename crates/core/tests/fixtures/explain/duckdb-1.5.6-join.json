@@ -1,0 +1,63 @@
+[
+    {
+        "name": "TOP_N",
+        "children": [
+            {
+                "name": "PROJECTION",
+                "children": [
+                    {
+                        "name": "HASH_JOIN",
+                        "children": [
+                            {
+                                "name": "SEQ_SCAN",
+                                "children": [],
+                                "extra_info": {
+                                    "Table": "shop.main.orders",
+                                    "Type": "Sequential Scan",
+                                    "Projections": [
+                                        "user_id",
+                                        "id",
+                                        "total"
+                                    ],
+                                    "Filters": "(CAST(status AS VARCHAR) = 'delivered')",
+                                    "Estimated Cardinality": "4000"
+                                }
+                            },
+                            {
+                                "name": "SEQ_SCAN",
+                                "children": [],
+                                "extra_info": {
+                                    "Table": "shop.main.users",
+                                    "Type": "Sequential Scan",
+                                    "Projections": [
+                                        "id",
+                                        "full_name"
+                                    ],
+                                    "Filters": "country='GB'",
+                                    "Estimated Cardinality": "1000"
+                                }
+                            }
+                        ],
+                        "extra_info": {
+                            "Join Type": "INNER",
+                            "Conditions": "user_id = id",
+                            "Estimated Cardinality": "418"
+                        }
+                    }
+                ],
+                "extra_info": {
+                    "Projections": [
+                        "full_name",
+                        "id",
+                        "total"
+                    ],
+                    "Estimated Cardinality": "418"
+                }
+            }
+        ],
+        "extra_info": {
+            "Top": "10",
+            "Order By": "o.total DESC"
+        }
+    }
+]

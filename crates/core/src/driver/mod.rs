@@ -88,6 +88,10 @@ pub struct Explained {
     pub reset_error: Option<String>,
 }
 
+/// Why Explain Analyze refuses a session with a transaction open.
+pub const TRANSACTION_OPEN: &str = "Explain Analyze runs the statement read-only, and this session has a transaction \
+                                    open whose writes it can't stop. Commit or roll back first.";
+
 /// Runs one statement on a session the caller holds.
 type Query<S> = for<'a> fn(&'a mut S, &'a str) -> BoxFuture<'a, Result<StatementResult>>;
 
@@ -109,10 +113,7 @@ async fn explain_with<S: Send>(
         bail!("this database measures plans through EXPLAIN statements");
     };
     if req.needs_idle_session && in_transaction(session).await? {
-        bail!(
-            "Explain Analyze runs the statement read-only, and this session has a transaction open whose writes \
-             it can't stop. Commit or roll back first."
-        );
+        bail!("{TRANSACTION_OPEN}");
     }
     let plan = async {
         for setup in &req.setup {

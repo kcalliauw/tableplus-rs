@@ -13,12 +13,12 @@ use anyhow::{Result, anyhow, bail};
 use async_trait::async_trait;
 use tableplus_core::driver::{BatchSink, Connection, DynConnection, Explained};
 use tableplus_core::duckdb::DuckDbTarget;
-use tableplus_core::plan::{Explain, ExplainStatements};
+use tableplus_core::plan::{DUCKDB_ANALYZE, Explain, ExplainStatements};
 use tableplus_core::{
     ConnectionConfig, Dialect, Flavor, QueryOutput, SchemaObject, ServerInfo, StatementResult, TableStructure,
 };
 
-use crate::raw::{Conn, Database, Interrupt};
+use crate::raw::{Conn, Database, Interrupt, StatementType};
 
 pub use crate::raw::library_version;
 
@@ -259,13 +259,26 @@ fn explain(c: &Conn, req: &ExplainStatements) -> Result<Explained> {
     let Explain::Statement(sql) = &req.explain else {
         bail!("DuckDB measures plans through EXPLAIN statements");
     };
+    // Counted by DuckDB's parser, because the app's statement check can miss a second statement.
+    if run::statement_count(c, sql)? != 1 {
+        bail!("Explain works on one statement at a time.");
+    }
+    // The statement check reads only the statement's shape; DuckDB's own type catches a write it
+    // misread. SELECT also covers SHOW, DESCRIBE and SUMMARIZE, which read.
+    if let Some(inner) = sql.strip_prefix(DUCKDB_ANALYZE)
+        && run::statement_type(c, inner)? != StatementType::Select
+    {
+        bail!("Explain Analyze runs the statement, and DuckDB says this one is not a query.");
+    }
+    // The setup opens a read-only transaction. Inside the user's own, it would fail and leave
+    // theirs aborted, so an open transaction is refused before anything runs.
+    if req.needs_idle_session && run::in_transaction(c)? {
+        bail!("{}", tableplus_core::driver::TRANSACTION_OPEN);
+    }
+    for setup in &req.setup {
+        c.execute(setup)?;
+    }
     let plan = (|| {
-        if run::statement_count(c, sql)? != 1 {
-            bail!("Explain works on one statement at a time.");
-        }
-        for setup in &req.setup {
-            c.execute(setup)?;
-        }
         let started = Instant::now();
         let result = run::collect(c, sql, None)?;
         Ok(QueryOutput { sql: sql.clone(), result, elapsed: started.elapsed() })

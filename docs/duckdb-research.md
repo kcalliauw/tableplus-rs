@@ -609,7 +609,7 @@ crates/
 ### Open questions for Koen
 
 1. **Network extensions.** Decided by Koen on 2026-10-19: auto-load on, auto-install off, and an explicit Install action, so opening a file never reaches the network silently.
-2. **Where the helper is downloaded from.** Koen chose on 2026-10-19 to keep the app at 20 MB, so DuckDB ships as a downloadable helper (section 7). GitHub releases fit, but upstream is michaelshimeles/tableplus-rs: either Michael publishes the helper with his releases, which needs his agreement, or the fork publishes it for now. This shapes what an upstream pull request contains, so it should be settled before phase 1.
+2. **Where the helper is downloaded from.** Decided by Koen on 2026-11-05: the fork's GitHub releases (kcalliauw/tableplus-rs) publish the helper for now, built, signed and notarized by the fork's CI. The download address sits in the engine list compiled into the app (section 7), so moving to upstream releases later changes only that list. Michael's agreement is needed before an upstream pull request carries the install feature.
 3. **Attached databases in the sidebar.** Current database only, `db.schema` labels, or a real database level (section 4)? Recommendation: `db.schema` labels.
 4. **Explain Analyze times.** Scale thread time to the statement's latency, as SQLite's cycle shares are scaled, or show raw thread time? Recommendation: scale.
 5. **MotherDuck.** In scope for the first release, or later? It needs a token field, the extension download, and plans from a partly remote engine that this research didn't capture.

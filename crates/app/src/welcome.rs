@@ -26,8 +26,15 @@ pub fn driver_color(driver: DriverKind) -> Color32 {
         DriverKind::Sqlite => Color32::from_rgb(0x0F, 0x80, 0xCC),
         // ClickHouse's yellow, darkened so the white badge text stays readable.
         DriverKind::ClickHouse => Color32::from_rgb(0x9A, 0x7B, 0x00),
-        // DuckDB's logo is a yellow duck on black; charcoal keeps it apart from ClickHouse.
-        DriverKind::DuckDb => Color32::from_rgb(0x3A, 0x3A, 0x3C),
+        // DuckDB's own yellow, with dark text like its logo.
+        DriverKind::DuckDb => Color32::from_rgb(0xFF, 0xF0, 0x00),
+    }
+}
+
+fn badge_text_color(driver: DriverKind) -> Color32 {
+    match driver {
+        DriverKind::DuckDb => Color32::from_rgb(0x1B, 0x1B, 0x1B),
+        _ => Color32::WHITE,
     }
 }
 
@@ -39,7 +46,7 @@ pub fn driver_badge(ui: &Ui, rect: egui::Rect, driver: DriverKind) {
         Align2::CENTER_CENTER,
         driver.badge(),
         theme::bold_font(rect.height() * 0.38),
-        Color32::WHITE,
+        badge_text_color(driver),
     );
 }
 

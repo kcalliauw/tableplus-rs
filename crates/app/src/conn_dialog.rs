@@ -3,6 +3,8 @@
 use eframe::egui::{self, Color32, CornerRadius, Key, RichText, Sense, Stroke, StrokeKind, TextEdit, Ui, vec2};
 use tableplus_core::config::{ColorTag, ConnectionConfig, Credentials, DriverKind, EnvTag, SshAuth, SslMode};
 use tableplus_core::driver;
+use tableplus_core::duckdb::{self, DuckDbTarget};
+use tableplus_core::engines;
 use tableplus_core::secrets::{SecretKind, SecretStore};
 
 use crate::task::{Spawner, Task, poll_slot};
@@ -16,9 +18,19 @@ pub enum DialogOutcome {
     Save { connect: bool },
 }
 
+/// New Connection first asks for the engine, then shows the form; Edit opens the form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Step {
+    Engine,
+    Form,
+}
+
 pub struct ConnDialog {
     pub config: ConnectionConfig,
     is_new: bool,
+    step: Step,
+    /// Engines whose helper program isn't installed, checked when the dialog opens.
+    missing_helpers: Vec<DriverKind>,
     password: String,
     ssh_password: String,
     ssh_passphrase: String,
@@ -32,7 +44,8 @@ pub struct ConnDialog {
 
 impl ConnDialog {
     pub fn new(config: ConnectionConfig, is_new: bool, secrets: &SecretStore) -> Self {
-        let get = |k| secrets.get_for(config.id, k).unwrap_or_default();
+        let file_based = config.driver.is_file_based();
+        let get = |k| if file_based { String::new() } else { secrets.get_for(config.id, k).unwrap_or_default() };
         Self {
             password: get(SecretKind::Password),
             ssh_password: get(SecretKind::SshPassword),
@@ -41,6 +54,11 @@ impl ConnDialog {
             ssh_port: config.ssh.port.to_string(),
             config,
             is_new,
+            step: if is_new { Step::Engine } else { Step::Form },
+            missing_helpers: DriverKind::ALL
+                .into_iter()
+                .filter(|d| d.helper().is_some_and(|e| !engines::is_available(e)))
+                .collect(),
             url: String::new(),
             url_error: None,
             test: None,
@@ -58,6 +76,10 @@ impl ConnDialog {
     }
 
     pub fn save_secrets(&self, secrets: &SecretStore) -> anyhow::Result<()> {
+        // New file connections never had secrets; an edited one keeps its engine.
+        if self.config.driver.is_file_based() {
+            return Ok(());
+        }
         let id = self.config.id;
         if self.config.save_password {
             secrets.set_for(id, SecretKind::Password, &self.password)?;
@@ -104,43 +126,38 @@ impl ConnDialog {
         let modal = crate::widgets::modal(ctx, "conn_dialog").show(ctx, |ui| {
             ui.set_width(580.0);
             let p = palette(ui);
-            ui.horizontal(|ui| {
-                ui.heading(if self.is_new { "New Connection" } else { "Edit Connection" });
-            });
-            ui.add_space(10.0);
-
-            // Driver picker.
-            ui.horizontal(|ui| {
-                let gap = ui.spacing().item_spacing.x;
-                let count = DriverKind::ALL.len() as f32;
-                let tile_w = (ui.available_width() - gap * (count - 1.0)) / count;
-                for d in DriverKind::ALL {
-                    let selected = self.config.driver == d;
-                    let (rect, resp) = ui.allocate_exact_size(vec2(tile_w, 48.0), Sense::click());
-                    let stroke = if selected { Stroke::new(1.5, p.accent) } else { Stroke::new(1.0, p.border) };
-                    let fill = if selected {
-                        p.accent.gamma_multiply(0.08)
-                    } else if resp.hovered() {
-                        p.hover.gamma_multiply(0.6)
-                    } else {
-                        p.content_bg
-                    };
-                    ui.painter().rect(rect, CornerRadius::same(8), fill, stroke, StrokeKind::Inside);
-                    // Badge and label are centred together so long names keep a margin.
-                    let label = ui.painter().layout_no_wrap(d.label().to_string(), theme::ui_font(12.0), p.text);
-                    let (badge_size, gap) = (22.0, 6.0);
-                    let left = (rect.center().x - (badge_size + gap + label.size().x) / 2.0).max(rect.left() + 6.0);
-                    let badge = egui::Rect::from_min_size(
-                        egui::pos2(left, rect.center().y - badge_size / 2.0),
-                        vec2(badge_size, badge_size),
-                    );
-                    driver_badge(ui, badge, d);
-                    let text_pos = egui::pos2(badge.right() + gap, rect.center().y - label.size().y / 2.0);
-                    ui.painter().galley(text_pos, label, p.text);
-                    if resp.clicked() {
-                        self.set_driver(d);
-                    }
+            if self.step == Step::Engine {
+                ui.heading("New Connection");
+                ui.label(widgets::muted(ui, "Choose a database engine."));
+                ui.add_space(12.0);
+                if let Some(d) = self.engine_grid(ui) {
+                    self.set_driver(d);
+                    self.test_result = None;
+                    self.step = Step::Form;
                 }
+                ui.add_space(4.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if widgets::button(ui, "Cancel").clicked() {
+                        outcome = DialogOutcome::Cancel;
+                    }
+                });
+                return;
+            }
+            if self.is_new {
+                let back = ui.add(
+                    egui::Label::new(RichText::new("‹ Back").color(p.accent).family(theme::semibold()))
+                        .sense(Sense::click()),
+                );
+                if back.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    self.step = Step::Engine;
+                }
+                ui.add_space(4.0);
+            }
+            ui.horizontal(|ui| {
+                let (badge, _) = ui.allocate_exact_size(vec2(26.0, 26.0), Sense::hover());
+                driver_badge(ui, badge, self.config.driver);
+                let verb = if self.is_new { "New" } else { "Edit" };
+                ui.heading(format!("{verb} {} Connection", self.config.driver.label()));
             });
             ui.add_space(12.0);
 
@@ -181,19 +198,27 @@ impl ConnDialog {
             ui.add_space(4.0);
 
             if self.config.driver.is_file_based() {
+                let duck = self.config.driver == DriverKind::DuckDb;
+                let memory = duck && self.config.path.trim() == duckdb::MEMORY;
                 row(ui, "Database file", &mut |ui| {
-                    ui.add(
-                        TextEdit::singleline(&mut self.config.path)
-                            .hint_text("/path/to/database.sqlite")
-                            .desired_width(full(ui) - 84.0),
+                    let hint = if duck {
+                        "/path/to/database.duckdb, or a .parquet, .csv or .json file"
+                    } else {
+                        "/path/to/database.sqlite"
+                    };
+                    ui.add_enabled(
+                        !memory,
+                        TextEdit::singleline(&mut self.config.path).hint_text(hint).desired_width(full(ui) - 84.0),
                     );
-                    if widgets::button(ui, "Browse…").clicked()
-                        && let Some(path) =
-                            rfd::FileDialog::new().add_filter("SQLite", &["sqlite", "sqlite3", "db", "db3"]).pick_file()
+                    if ui.add_enabled(!memory, egui::Button::new("Browse…").min_size(vec2(0.0, 26.0))).clicked()
+                        && let Some(path) = file_picker(self.config.driver).pick_file()
                     {
                         self.config.path = path.display().to_string();
                     }
                 });
+                if duck {
+                    self.duckdb_options(ui, label_w, memory);
+                }
             } else {
                 row(ui, "Host", &mut |ui| {
                     ui.add(
@@ -379,6 +404,104 @@ impl ConnDialog {
             outcome = DialogOutcome::Cancel;
         }
         outcome
+    }
+}
+
+impl ConnDialog {
+    /// Large cards, three per row, one per engine. Returns the engine clicked.
+    fn engine_grid(&self, ui: &mut Ui) -> Option<DriverKind> {
+        let p = palette(ui);
+        let (columns, gap, height) = (3, 10.0, 104.0);
+        let width = (ui.available_width() - gap * (columns as f32 - 1.0)) / columns as f32;
+        let mut picked = None;
+        for engines in DriverKind::ALL.chunks(columns) {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                for &d in engines {
+                    let (rect, resp) = ui.allocate_exact_size(vec2(width, height), Sense::click());
+                    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+                    let hovered = resp.hovered();
+                    let stroke = if hovered { Stroke::new(1.5, p.accent) } else { Stroke::new(1.0, p.border) };
+                    let fill = if hovered { p.accent.gamma_multiply(0.07) } else { p.content_bg };
+                    ui.painter().rect(rect, CornerRadius::same(10), fill, stroke, StrokeKind::Inside);
+                    let name = ui.painter().layout_no_wrap(d.label().to_string(), theme::bold_font(13.0), p.text);
+                    let note =
+                        self.missing_helpers.contains(&d).then(|| d.helper().map(|e| e.size_label)).flatten().map(
+                            |size| ui.painter().layout_no_wrap(size.to_string(), theme::ui_font(11.0), p.text_muted),
+                        );
+                    let badge = 36.0;
+                    let note_h = note.as_ref().map_or(0.0, |n| n.size().y + 2.0);
+                    let top = rect.center().y - (badge + 8.0 + name.size().y + note_h) / 2.0;
+                    let badge_rect =
+                        egui::Rect::from_min_size(egui::pos2(rect.center().x - badge / 2.0, top), vec2(badge, badge));
+                    driver_badge(ui, badge_rect, d);
+                    let name_y = badge_rect.bottom() + 8.0;
+                    let name_w = name.size().x;
+                    ui.painter().galley(egui::pos2(rect.center().x - name_w / 2.0, name_y), name.clone(), p.text);
+                    if let Some(note) = note {
+                        let y = name_y + name.size().y + 2.0;
+                        let x = rect.center().x - note.size().x / 2.0;
+                        ui.painter().galley(egui::pos2(x, y), note, p.text_muted);
+                    }
+                    if resp.clicked() {
+                        picked = Some(d);
+                    }
+                }
+            });
+            ui.add_space(gap);
+        }
+        picked
+    }
+
+    /// In memory and read-only, and what a data file as the path does.
+    fn duckdb_options(&mut self, ui: &mut Ui, label_w: f32, memory: bool) {
+        let target = DuckDbTarget::of(&self.config).ok();
+        let data_file = matches!(target, Some(DuckDbTarget::DataFile { .. }));
+        ui.horizontal(|ui| {
+            ui.add_space(label_w + ui.spacing().item_spacing.x);
+            let mut in_memory = memory;
+            if ui.checkbox(&mut in_memory, "In memory").changed() {
+                self.config.path = if in_memory { duckdb::MEMORY.into() } else { String::new() };
+                self.config.read_only = false;
+            }
+            if !in_memory && !data_file {
+                ui.checkbox(&mut self.config.read_only, "Read-only").on_hover_text(
+                    "Other programs can read the file while it is open here. Only one program at a time can open \
+                     a DuckDB file for writing.",
+                );
+            }
+        });
+        let note = match target {
+            Some(DuckDbTarget::DataFile { view, .. }) => Some(format!(
+                "Opens the file as a view named \"{view}\" in an in-memory database. The file is only read."
+            )),
+            Some(DuckDbTarget::Memory) => Some("The database lives in memory and is gone when you disconnect.".into()),
+            _ => None,
+        };
+        if let Some(note) = note {
+            ui.horizontal(|ui| {
+                ui.add_space(label_w + ui.spacing().item_spacing.x);
+                ui.vertical(|ui| {
+                    ui.set_max_width(ui.available_width());
+                    ui.add(egui::Label::new(widgets::muted(ui, note)).wrap());
+                });
+            });
+        }
+    }
+}
+
+/// The Browse… dialog for a file-based engine's database file.
+fn file_picker(driver: DriverKind) -> rfd::FileDialog {
+    match driver {
+        DriverKind::DuckDb => {
+            let all: Vec<&str> =
+                duckdb::DATABASE_EXTENSIONS.iter().chain(duckdb::DATA_FILE_EXTENSIONS).copied().collect();
+            rfd::FileDialog::new()
+                .add_filter("DuckDB and data files", &all)
+                .add_filter("DuckDB databases", duckdb::DATABASE_EXTENSIONS)
+                .add_filter("Parquet, CSV and JSON files", duckdb::DATA_FILE_EXTENSIONS)
+        }
+        _ => rfd::FileDialog::new().add_filter("SQLite", &["sqlite", "sqlite3", "db", "db3"]),
     }
 }
 

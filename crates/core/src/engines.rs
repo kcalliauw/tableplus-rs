@@ -19,6 +19,8 @@ pub struct HelperEngine {
     pub env_var: &'static str,
     /// The engine version the helper was released with; installs go into a folder named after it.
     pub version: &'static str,
+    /// The installed helper's size, shown before it is installed.
+    pub size_label: &'static str,
     /// The file a connection holds open, with its access mode, when sessions on it must share
     /// one helper process. `None` gives the connection a helper of its own.
     pub shared_file: fn(&ConnectionConfig) -> Option<(PathBuf, bool)>,
@@ -30,6 +32,7 @@ pub static DUCKDB: HelperEngine = HelperEngine {
     binary: "tableplus-duckdb",
     env_var: "TABLEPLUS_DUCKDB_HELPER",
     version: "1.5.6",
+    size_label: "36 MB",
     shared_file: duckdb_shared_file,
 };
 
@@ -46,6 +49,11 @@ fn duckdb_shared_file(config: &ConnectionConfig) -> Option<(PathBuf, bool)> {
 /// Where the installed copy of an engine's helper lives.
 pub fn install_dir(engine: &HelperEngine) -> PathBuf {
     crate::store::config_dir().join("engines").join(engine.name).join(engine.version)
+}
+
+/// Whether the app can start the engine's helper.
+pub fn is_available(engine: &HelperEngine) -> bool {
+    locate(engine).is_ok()
 }
 
 /// Finds the helper: the path in its environment variable, then a binary next to the app's own

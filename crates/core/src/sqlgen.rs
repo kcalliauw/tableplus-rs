@@ -103,7 +103,7 @@ pub struct SortKey {
 
 fn text_cast(dialect: Dialect, expr: &str) -> String {
     match dialect {
-        Dialect::Postgres | Dialect::Sqlite => format!("CAST({expr} AS TEXT)"),
+        Dialect::Postgres | Dialect::Sqlite | Dialect::DuckDb => format!("CAST({expr} AS TEXT)"),
         Dialect::MySql => format!("CAST({expr} AS CHAR)"),
         // A CAST of a NULL to the non-nullable String fails; toString keeps it NULL.
         Dialect::ClickHouse => format!("toString({expr})"),
@@ -130,6 +130,8 @@ fn like_expr(dialect: Dialect, column_expr: &str, pattern: &str, negate: bool) -
         }
         Dialect::MySql => format!("{} {not}LIKE {pattern}", text_cast(dialect, column_expr)),
         Dialect::Sqlite => format!("{} {not}LIKE {pattern} ESCAPE '\\'", text_cast(dialect, column_expr)),
+        // Unlike PostgreSQL, DuckDB has no default escape character.
+        Dialect::DuckDb => format!("{} {not}ILIKE {pattern} ESCAPE '\\'", text_cast(dialect, column_expr)),
     }
 }
 
@@ -270,7 +272,7 @@ pub fn select_page_sql(
         None if offset > 0 => match dialect {
             Dialect::MySql => sql.push_str(&format!(" LIMIT 18446744073709551615 OFFSET {offset}")),
             Dialect::Sqlite => sql.push_str(&format!(" LIMIT -1 OFFSET {offset}")),
-            Dialect::Postgres | Dialect::ClickHouse => sql.push_str(&format!(" OFFSET {offset}")),
+            Dialect::Postgres | Dialect::ClickHouse | Dialect::DuckDb => sql.push_str(&format!(" OFFSET {offset}")),
         },
         None => {}
     }
@@ -343,6 +345,10 @@ impl RowIdentity {
                     Value::Float(f) if !self.by_primary_key && dialect == Dialect::Postgres => {
                         format!("{col}::text = {}", dialect.quote_str(&f.to_string()))
                     }
+                    // The DuckDB helper reads every value without a native type as this cast.
+                    Value::Text(t) if !self.by_primary_key && dialect == Dialect::DuckDb => {
+                        format!("CAST({col} AS VARCHAR) = {}", dialect.quote_str(t))
+                    }
                     other => format!("{col} = {}", dialect.literal(other)),
                 }
             })
@@ -358,7 +364,9 @@ impl RowIdentity {
         }
         match dialect {
             Dialect::Postgres => (format!("ctid = (SELECT ctid FROM {table} WHERE {pred} LIMIT 1)"), ""),
-            Dialect::Sqlite => (format!("rowid = (SELECT rowid FROM {table} WHERE {pred} LIMIT 1)"), ""),
+            Dialect::Sqlite | Dialect::DuckDb => {
+                (format!("rowid = (SELECT rowid FROM {table} WHERE {pred} LIMIT 1)"), "")
+            }
             Dialect::MySql | Dialect::ClickHouse => (pred, " LIMIT 1"),
         }
     }

@@ -26,6 +26,8 @@ pub fn driver_color(driver: DriverKind) -> Color32 {
         DriverKind::Sqlite => Color32::from_rgb(0x0F, 0x80, 0xCC),
         // ClickHouse's yellow, darkened so the white badge text stays readable.
         DriverKind::ClickHouse => Color32::from_rgb(0x9A, 0x7B, 0x00),
+        // DuckDB's logo is a yellow duck on black; charcoal keeps it apart from ClickHouse.
+        DriverKind::DuckDb => Color32::from_rgb(0x3A, 0x3A, 0x3C),
     }
 }
 
@@ -153,7 +155,10 @@ pub fn show(ui: &mut Ui, state: &mut WelcomeState, view: WelcomeView<'_>, action
             rui.add_space(rui.available_height() / 3.0);
             rui.vertical_centered(|ui| {
                 ui.label(RichText::new("No connections yet").font(theme::bold_font(15.0)));
-                ui.label(widgets::muted(ui, "Create one to browse PostgreSQL, MySQL, MariaDB or SQLite."));
+                ui.label(widgets::muted(
+                    ui,
+                    "Create one to browse PostgreSQL, MySQL, MariaDB, ClickHouse, SQLite or DuckDB.",
+                ));
             });
             return;
         }

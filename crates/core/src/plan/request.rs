@@ -2,6 +2,8 @@
 //! EXPLAIN capability matrix captured from 18 servers (MySQL 5.6 to 9.7, MariaDB 10.6 to 11.8,
 //! PostgreSQL 12 to 18 and SQLite 3.53), plus ClickHouse, whose EXPLAIN never runs the statement.
 
+use serde::{Deserialize, Serialize};
+
 use crate::dialect::Dialect;
 use crate::server::{Flavor, ServerInfo, Version};
 use crate::sqltext::{Token, TokenKind, split_statements, tokenize, trim_statement};
@@ -18,7 +20,7 @@ pub enum ExplainMode {
 
 /// What [`Connection::explain`](crate::driver::Connection::explain) runs: `setup`, then
 /// `explain`, then `reset`, even when `explain` fails.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExplainStatements {
     pub setup: Vec<String>,
     pub explain: Explain,
@@ -30,7 +32,7 @@ pub struct ExplainStatements {
     pub needs_idle_session: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Explain {
     /// An EXPLAIN statement, whose rows are the plan.
     Statement(String),
@@ -122,6 +124,8 @@ const fn read_only(flavor: Flavor) -> (&'static [&'static str], &'static [&'stat
                  @@SESSION.tx_read_only = @tableplus_explain_read_only",
             ],
         ),
+        // Still lets COPY … TO write a file, which the statement check refuses.
+        Flavor::DuckDb => (&["BEGIN TRANSACTION READ ONLY"], &["ROLLBACK"]),
         Flavor::Sqlite | Flavor::ClickHouse => (&[], &[]),
     }
 }

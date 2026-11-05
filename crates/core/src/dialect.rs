@@ -10,6 +10,7 @@ pub enum Dialect {
     MySql,
     Sqlite,
     ClickHouse,
+    DuckDb,
 }
 
 impl Dialect {
@@ -17,7 +18,7 @@ impl Dialect {
         match self {
             Dialect::MySql => format!("`{}`", ident.replace('`', "``")),
             Dialect::ClickHouse => format!("`{}`", ident.replace('\\', "\\\\").replace('`', "\\`")),
-            Dialect::Postgres | Dialect::Sqlite => format!("\"{}\"", ident.replace('"', "\"\"")),
+            Dialect::Postgres | Dialect::Sqlite | Dialect::DuckDb => format!("\"{}\"", ident.replace('"', "\"\"")),
         }
     }
 
@@ -52,6 +53,8 @@ impl Dialect {
             Dialect::Postgres => format!("'\\x{}'::bytea", hex.to_ascii_lowercase()),
             Dialect::MySql | Dialect::Sqlite => format!("X'{hex}'"),
             Dialect::ClickHouse => format!("unhex('{hex}')"),
+            // DuckDB reads X'…' as text and '\x…'::bytea as escaped characters.
+            Dialect::DuckDb => format!("from_hex('{hex}')"),
         }
     }
 
@@ -107,6 +110,7 @@ impl Dialect {
             Dialect::MySql => "MySQL",
             Dialect::Sqlite => "SQLite",
             Dialect::ClickHouse => "ClickHouse",
+            Dialect::DuckDb => "DuckDB",
         }
     }
 
@@ -119,7 +123,7 @@ impl Dialect {
     /// or `None` when they can. Imports and the SQL editor still write.
     pub fn read_only_reason(self) -> Option<&'static str> {
         match self {
-            Dialect::Postgres | Dialect::MySql | Dialect::Sqlite => None,
+            Dialect::Postgres | Dialect::MySql | Dialect::Sqlite | Dialect::DuckDb => None,
             Dialect::ClickHouse => Some(
                 "ClickHouse has no transactions and its sorting key doesn't identify a row, so edits here could \
                  change other rows or apply halfway. Use ALTER TABLE in the SQL editor.",
@@ -201,6 +205,30 @@ impl Dialect {
                 "Nullable(String)",
                 "JSON",
             ],
+            Dialect::DuckDb => &[
+                "INTEGER",
+                "BIGINT",
+                "SMALLINT",
+                "HUGEINT",
+                "UBIGINT",
+                "DECIMAL(18,3)",
+                "DOUBLE",
+                "FLOAT",
+                "BOOLEAN",
+                "VARCHAR",
+                "UUID",
+                "DATE",
+                "TIME",
+                "TIMESTAMP",
+                "TIMESTAMPTZ",
+                "INTERVAL",
+                "JSON",
+                "BLOB",
+                "VARCHAR[]",
+                "INTEGER[]",
+                "STRUCT(a INTEGER, b VARCHAR)",
+                "MAP(VARCHAR, INTEGER)",
+            ],
         }
     }
 }
@@ -244,6 +272,10 @@ mod tests {
         assert_eq!(Dialect::MySql.edit_literal("bit(8)", "165"), "165");
         assert_eq!(Dialect::ClickHouse.literal(&Value::Bytes(vec![0xAB, 0x01].into())), "unhex('AB01')");
         assert_eq!(Dialect::ClickHouse.literal(&Value::Bool(false)), "false");
+        assert_eq!(Dialect::DuckDb.literal(&Value::Bytes(vec![0xDE, 0xAD].into())), "from_hex('DEAD')");
+        assert_eq!(Dialect::DuckDb.edit_literal("BLOB", "0xdead"), "from_hex('DEAD')");
+        assert_eq!(Dialect::DuckDb.literal(&Value::Bool(true)), "TRUE");
+        assert_eq!(Dialect::DuckDb.quote_str("it's \\ ok"), "'it''s \\ ok'");
         assert!(Dialect::ClickHouse.read_only_reason().is_some() && Dialect::MySql.read_only_reason().is_none());
     }
 }

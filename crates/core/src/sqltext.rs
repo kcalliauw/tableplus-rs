@@ -414,16 +414,19 @@ pub fn tokenize(src: &str, dialect: Dialect) -> Vec<Token> {
         } else if c == '\'' || (dialect == Dialect::MySql && c == '"') {
             i = scan_quoted(src, i, c, dialect.backslash_escapes());
             TokenKind::String
-        } else if (c == 'E' || c == 'e') && dialect == Dialect::Postgres && bytes.get(i + 1) == Some(&b'\'') {
+        } else if (c == 'E' || c == 'e')
+            && matches!(dialect, Dialect::Postgres | Dialect::DuckDb)
+            && bytes.get(i + 1) == Some(&b'\'')
+        {
             i = scan_quoted(src, i + 1, '\'', true);
             TokenKind::String
         } else if (c == 'X' || c == 'x') && bytes.get(i + 1) == Some(&b'\'') {
             i = scan_quoted(src, i + 1, '\'', false);
             TokenKind::String
-        } else if c == '"' || (c == '`' && dialect != Dialect::Postgres) {
+        } else if c == '"' || (c == '`' && !matches!(dialect, Dialect::Postgres | Dialect::DuckDb)) {
             i = scan_quoted(src, i, c, dialect == Dialect::ClickHouse);
             TokenKind::QuotedIdent
-        } else if c == '$' && matches!(dialect, Dialect::Postgres | Dialect::ClickHouse) {
+        } else if c == '$' && matches!(dialect, Dialect::Postgres | Dialect::ClickHouse | Dialect::DuckDb) {
             if let Some(end) = scan_dollar_quoted(src, i) {
                 i = end;
                 TokenKind::String
@@ -490,7 +493,9 @@ fn block_comment_end(src: &str, open: usize, dialect: Dialect) -> usize {
     let mut i = open;
     while i + 1 < bytes.len() {
         match (bytes[i], bytes[i + 1]) {
-            (b'/', b'*') if depth == 0 || matches!(dialect, Dialect::Postgres | Dialect::ClickHouse) => {
+            (b'/', b'*')
+                if depth == 0 || matches!(dialect, Dialect::Postgres | Dialect::ClickHouse | Dialect::DuckDb) =>
+            {
                 depth += 1;
                 i += 2;
             }

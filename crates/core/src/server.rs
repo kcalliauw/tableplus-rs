@@ -3,17 +3,20 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 use crate::dialect::Dialect;
 
 /// The database engine. MariaDB is separate from MySQL here because their EXPLAIN support
 /// differs, even though they share a SQL dialect.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Flavor {
     Postgres,
     MySql,
     MariaDb,
     Sqlite,
     ClickHouse,
+    DuckDb,
 }
 
 impl Flavor {
@@ -24,6 +27,7 @@ impl Flavor {
             Flavor::MariaDb => "MariaDB",
             Flavor::Sqlite => "SQLite",
             Flavor::ClickHouse => "ClickHouse",
+            Flavor::DuckDb => "DuckDB",
         }
     }
 
@@ -33,12 +37,13 @@ impl Flavor {
             Flavor::MySql | Flavor::MariaDb => Dialect::MySql,
             Flavor::Sqlite => Dialect::Sqlite,
             Flavor::ClickHouse => Dialect::ClickHouse,
+            Flavor::DuckDb => Dialect::DuckDb,
         }
     }
 }
 
 /// A server version, ordered numerically: `8.0.18 < 8.0.46 < 8.4.0`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
 pub struct Version {
     pub major: u32,
     pub minor: u32,
@@ -54,7 +59,8 @@ impl Version {
     /// `10.6.28-MariaDB-ubu2004`, `17.6 (Debian 17.6-1)` or `18beta1`. Missing parts are zero.
     pub fn parse(text: &str) -> Option<Self> {
         let mut parts = [0u32; 3];
-        let mut rest = text.trim_start();
+        let trimmed = text.trim_start();
+        let mut rest = trimmed.strip_prefix(['v', 'V']).unwrap_or(trimmed);
         for (i, part) in parts.iter_mut().enumerate() {
             let digits = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
             if digits == 0 {
@@ -78,7 +84,7 @@ impl fmt::Display for Version {
 }
 
 /// The engine and version behind a connection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ServerInfo {
     pub flavor: Flavor,
     pub version: Version,
@@ -125,6 +131,7 @@ mod tests {
             ("18beta1", Version::new(18, 0, 0)),
             ("3.53.2", Version::new(3, 53, 2)),
             ("25.8.33.6", Version::new(25, 8, 33)),
+            ("v1.5.6", Version::new(1, 5, 6)),
         ] {
             assert_eq!(Version::parse(text), Some(expected), "{text}");
         }

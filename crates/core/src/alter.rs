@@ -137,7 +137,7 @@ pub fn alter_statements(
                 out.push(format!("CREATE {unique}INDEX {idx_name} ON {target} ({cols})"));
             }
             StructureChange::DropIndex(name) => out.push(match dialect {
-                Dialect::Postgres | Dialect::Sqlite => {
+                Dialect::Postgres | Dialect::Sqlite | Dialect::DuckDb => {
                     format!("DROP INDEX {}", dialect.qualified(schema, name))
                 }
                 Dialect::MySql => format!("DROP INDEX {} ON {t}", q(name)),
@@ -155,6 +155,9 @@ pub fn alter_statements(
                 }
                 (Dialect::Sqlite, _) => {
                     return Err("SQLite cannot drop constraints in place".into());
+                }
+                (Dialect::DuckDb, _) => {
+                    return Err("DuckDB cannot drop constraints in place".into());
                 }
                 _ => format!("ALTER TABLE {t} DROP CONSTRAINT {}", q(name)),
             }),
@@ -176,7 +179,7 @@ fn modify_column(dialect: Dialect, t: &str, orig: &ColumnInfo, new: &ColumnDef, 
                 out.push(format!("ALTER TABLE {t} CHANGE COLUMN {} {}", q(&orig.name), column_sql(dialect, new, true)));
             }
         }
-        Dialect::Postgres => {
+        Dialect::Postgres | Dialect::DuckDb => {
             let col = q(&new.name);
             if renamed {
                 out.push(format!("ALTER TABLE {t} RENAME COLUMN {} TO {col}", q(&orig.name)));

@@ -20,6 +20,7 @@ pub type BatchSink<'a> = dyn FnMut(&[ColumnMeta], Vec<Row>) -> Result<()> + Send
 pub mod clickhouse;
 pub mod mysql;
 pub mod postgres;
+pub mod remote;
 pub mod sqlite;
 
 /// An open connection. All methods take `&self`; implementations serialize access
@@ -67,6 +68,7 @@ pub async fn connect(config: &ConnectionConfig, creds: &Credentials) -> Result<D
         DriverKind::MySql | DriverKind::MariaDb => Arc::new(mysql::MyConnection::connect(config, creds).await?),
         DriverKind::Sqlite => Arc::new(sqlite::SqliteConnection::open(config).await?),
         DriverKind::ClickHouse => Arc::new(clickhouse::ChConnection::connect(config, creds).await?),
+        DriverKind::DuckDb => Arc::new(remote::RemoteConnection::open(&crate::engines::DUCKDB, config).await?),
     })
 }
 
@@ -78,7 +80,7 @@ pub async fn run(conn: &dyn Connection, sql: &str, max_rows: Option<usize>) -> R
 }
 
 /// A plan from [`Connection::explain`]. Its time covers the plan request alone.
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Explained {
     pub output: QueryOutput,
     /// Set when a reset statement failed, so the session may keep the setup's settings, such as
@@ -133,7 +135,7 @@ async fn explain_with<S: Send>(
 }
 
 /// The plan's outcome, with the reset statements that failed reported beside it.
-fn explained(plan: Result<QueryOutput>, failed_resets: Vec<String>) -> Result<Explained> {
+pub fn explained(plan: Result<QueryOutput>, failed_resets: Vec<String>) -> Result<Explained> {
     let reset_error = (!failed_resets.is_empty())
         .then(|| format!("Could not put the session's settings back after the plan.\n{}", failed_resets.join("\n")));
     match (plan, reset_error) {

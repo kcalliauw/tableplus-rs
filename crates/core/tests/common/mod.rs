@@ -112,6 +112,7 @@ fn types(d: Dialect) -> [&'static str; 5] {
         Dialect::Postgres => ["integer", "text", "numeric(10,2)", "text", "bytea"],
         Dialect::MySql => ["int", "varchar(100)", "decimal(10,2)", "varchar(255)", "blob"],
         Dialect::Sqlite => ["INTEGER", "TEXT", "NUMERIC", "TEXT", "BLOB"],
+        Dialect::DuckDb => ["INTEGER", "VARCHAR", "DECIMAL(10,2)", "VARCHAR", "BLOB"],
         Dialect::ClickHouse => unreachable!("the grid and structure editor don't edit ClickHouse"),
     }
 }

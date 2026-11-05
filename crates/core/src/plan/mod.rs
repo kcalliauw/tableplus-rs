@@ -32,7 +32,7 @@ impl NodeId {
 }
 
 /// The output format a plan was read from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum PlanFormat {
     /// MySQL 8.0.18+ `EXPLAIN FORMAT=TREE` and `EXPLAIN ANALYZE` text (the 9.x default).
     MySqlTree,

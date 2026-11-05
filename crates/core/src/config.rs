@@ -12,11 +12,18 @@ pub enum DriverKind {
     MariaDb,
     Sqlite,
     ClickHouse,
+    DuckDb,
 }
 
 impl DriverKind {
-    pub const ALL: [DriverKind; 5] =
-        [DriverKind::Postgres, DriverKind::MySql, DriverKind::MariaDb, DriverKind::Sqlite, DriverKind::ClickHouse];
+    pub const ALL: [DriverKind; 6] = [
+        DriverKind::Postgres,
+        DriverKind::MySql,
+        DriverKind::MariaDb,
+        DriverKind::ClickHouse,
+        DriverKind::Sqlite,
+        DriverKind::DuckDb,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -25,6 +32,7 @@ impl DriverKind {
             DriverKind::MariaDb => "MariaDB",
             DriverKind::Sqlite => "SQLite",
             DriverKind::ClickHouse => "ClickHouse",
+            DriverKind::DuckDb => "DuckDB",
         }
     }
 
@@ -36,6 +44,7 @@ impl DriverKind {
             DriverKind::MariaDb => "Ma",
             DriverKind::Sqlite => "Sl",
             DriverKind::ClickHouse => "Ch",
+            DriverKind::DuckDb => "Dk",
         }
     }
 
@@ -43,7 +52,7 @@ impl DriverKind {
         match self {
             DriverKind::Postgres => 5432,
             DriverKind::MySql | DriverKind::MariaDb => 3306,
-            DriverKind::Sqlite => 0,
+            DriverKind::Sqlite | DriverKind::DuckDb => 0,
             DriverKind::ClickHouse => 8123,
         }
     }
@@ -52,7 +61,7 @@ impl DriverKind {
         match self {
             DriverKind::Postgres => "postgres",
             DriverKind::MySql | DriverKind::MariaDb => "root",
-            DriverKind::Sqlite => "",
+            DriverKind::Sqlite | DriverKind::DuckDb => "",
             DriverKind::ClickHouse => "default",
         }
     }
@@ -63,11 +72,17 @@ impl DriverKind {
             DriverKind::MySql | DriverKind::MariaDb => Dialect::MySql,
             DriverKind::Sqlite => Dialect::Sqlite,
             DriverKind::ClickHouse => Dialect::ClickHouse,
+            DriverKind::DuckDb => Dialect::DuckDb,
         }
     }
 
     pub fn is_file_based(self) -> bool {
-        self == DriverKind::Sqlite
+        matches!(self, DriverKind::Sqlite | DriverKind::DuckDb)
+    }
+
+    /// The engine runs in a helper program the app downloads on first use.
+    pub fn helper(self) -> Option<&'static crate::engines::HelperEngine> {
+        (self == DriverKind::DuckDb).then_some(&crate::engines::DUCKDB)
     }
 }
 
@@ -233,8 +248,11 @@ pub struct ConnectionConfig {
     pub port: u16,
     pub user: String,
     pub database: String,
-    /// SQLite database file.
+    /// SQLite or DuckDB database file. DuckDB also takes `:memory:` and Parquet, CSV or JSON
+    /// files (see [`crate::duckdb::DuckDbTarget`]).
     pub path: String,
+    /// DuckDB: open the file read-only, so other processes can read it too.
+    pub read_only: bool,
     pub save_password: bool,
     pub tls: TlsConfig,
     pub ssh: SshConfig,
@@ -260,6 +278,7 @@ impl ConnectionConfig {
             user: driver.default_user().into(),
             database: String::new(),
             path: String::new(),
+            read_only: false,
             save_password: true,
             tls: TlsConfig::default(),
             ssh: SshConfig::default(),
@@ -274,7 +293,7 @@ impl ConnectionConfig {
             return std::path::Path::new(&self.path)
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "SQLite".into());
+                .unwrap_or_else(|| self.driver.label().into());
         }
         format!("{}@{}", self.user, self.host)
     }
@@ -320,10 +339,11 @@ impl ConnectionConfig {
             "mariadb" => DriverKind::MariaDb,
             "clickhouse" => DriverKind::ClickHouse,
             "sqlite" | "sqlite3" | "file" => DriverKind::Sqlite,
+            "duckdb" => DriverKind::DuckDb,
             other => return Err(format!("Unsupported scheme \"{other}\"")),
         };
         let mut c = ConnectionConfig::new(driver);
-        if driver == DriverKind::Sqlite {
+        if driver.is_file_based() {
             c.path = percent_decode(rest.split('?').next().unwrap_or_default());
             return Ok((c, None));
         }
@@ -411,6 +431,8 @@ mod tests {
         assert_eq!((c.port, c.user.as_str()), (8123, "default"));
         let (c, _) = ConnectionConfig::from_url("sqlite:///tmp/my%20db.sqlite").unwrap();
         assert_eq!(c.path, "/tmp/my db.sqlite");
+        let (c, _) = ConnectionConfig::from_url("duckdb:///data/shop.duckdb").unwrap();
+        assert_eq!((c.driver, c.path.as_str()), (DriverKind::DuckDb, "/data/shop.duckdb"));
         assert!(ConnectionConfig::from_url("redis://x").is_err());
         assert!(ConnectionConfig::from_url("nonsense").is_err());
     }

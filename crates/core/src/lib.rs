@@ -6,6 +6,8 @@ pub mod completion;
 pub mod config;
 pub mod dialect;
 pub mod driver;
+pub mod duckdb;
+pub mod engines;
 pub mod export;
 pub mod fuzzy;
 pub mod model;

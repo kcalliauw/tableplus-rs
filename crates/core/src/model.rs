@@ -62,7 +62,7 @@ impl SchemaObject {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ColumnInfo {
     pub name: String,
     /// Full type as the server spells it, e.g. `character varying(255)` or `decimal(12,2)`.
@@ -76,7 +76,7 @@ pub struct ColumnInfo {
     pub comment: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct IndexInfo {
     pub name: String,
     pub columns: Vec<String>,
@@ -88,7 +88,7 @@ pub struct IndexInfo {
     pub definition: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConstraintKind {
     PrimaryKey,
     ForeignKey,
@@ -107,7 +107,7 @@ impl ConstraintKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConstraintInfo {
     pub name: String,
     pub kind: ConstraintKind,
@@ -116,7 +116,7 @@ pub struct ConstraintInfo {
     pub definition: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct TableStructure {
     pub columns: Vec<ColumnInfo>,
     pub indexes: Vec<IndexInfo>,
@@ -144,7 +144,7 @@ impl TableStructure {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ColumnMeta {
     pub name: String,
     pub type_name: String,
@@ -182,6 +182,14 @@ impl ColumnMeta {
                 | "float4"
                 | "float8"
                 | "money"
+                | "hugeint"
+                | "uhugeint"
+                | "utinyint"
+                | "usmallint"
+                | "uinteger"
+                | "ubigint"
+                | "bignum"
+                | "varint"
         )
     }
 }
@@ -189,7 +197,7 @@ impl ColumnMeta {
 pub type Row = Box<[Value]>;
 
 /// Rows returned by a statement.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ResultSet {
     pub columns: Vec<ColumnMeta>,
     pub rows: Vec<Row>,
@@ -203,14 +211,14 @@ impl ResultSet {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StatementResult {
     Rows(ResultSet),
     Affected(u64),
 }
 
 /// The outcome of one executed statement.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryOutput {
     pub sql: String,
     pub result: StatementResult,
@@ -239,7 +247,17 @@ mod tests {
 
     #[test]
     fn numeric_column_types() {
-        for t in ["integer", "BIGINT", "numeric(12,2)", "double precision", "int unsigned", "tinyint(1)", "float8"] {
+        for t in [
+            "integer",
+            "BIGINT",
+            "numeric(12,2)",
+            "double precision",
+            "int unsigned",
+            "tinyint(1)",
+            "float8",
+            "HUGEINT",
+            "UBIGINT",
+        ] {
             assert!(ColumnMeta::new("c", t).is_numeric(), "{t}");
         }
         for t in ["text", "varchar(20)", "timestamp with time zone", "jsonb", "boolean", "interval", ""] {

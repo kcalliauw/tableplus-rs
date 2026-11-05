@@ -3,10 +3,12 @@
 use std::borrow::Cow;
 use std::fmt::Write as _;
 
+use serde::{Deserialize, Serialize};
+
 /// A single cell value. Drivers convert their native types into this compact enum;
 /// anything without a natural Rust representation (timestamps, intervals, arrays, JSON…)
 /// is kept as the server's own text rendering, which is exactly what users expect to see.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Value {
     Null,
     Bool(bool),

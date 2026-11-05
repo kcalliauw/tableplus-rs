@@ -168,6 +168,8 @@ pub struct TablePlusApp {
     connect_errors: std::collections::HashMap<Uuid, String>,
     pub welcome: crate::welcome::WelcomeState,
     conn_dialog: Option<ConnDialog>,
+    /// Helper engines in Preferences, which can be installed, updated or removed there.
+    engine_installers: Vec<crate::engine_panel::Installer>,
     password_prompt: Option<PasswordPrompt>,
     quick_open: Option<QuickOpen>,
     export_dialog: Option<ExportDialog>,
@@ -176,6 +178,8 @@ pub struct TablePlusApp {
     applied_theme: Option<ThemeChoice>,
     title: String,
     settings_open: bool,
+    /// Whether Preferences was open last frame, so it reads the install folder once per opening.
+    settings_shown: bool,
     #[cfg(target_os = "macos")]
     menu: Option<crate::macos_menu::AppMenu>,
 }
@@ -205,6 +209,10 @@ impl TablePlusApp {
             connect_errors: Default::default(),
             welcome: Default::default(),
             conn_dialog: None,
+            engine_installers: tableplus_core::engines::ALL
+                .iter()
+                .map(|e| crate::engine_panel::Installer::new(e))
+                .collect(),
             password_prompt: None,
             quick_open: None,
             export_dialog: None,
@@ -213,6 +221,7 @@ impl TablePlusApp {
             applied_theme: None,
             title: String::new(),
             settings_open: false,
+            settings_shown: false,
             #[cfg(target_os = "macos")]
             menu: crate::macos_menu::AppMenu::install(),
         };
@@ -711,6 +720,13 @@ impl TablePlusApp {
         {
             self.import_dialog = None;
         }
+        if self.settings_open && !self.settings_shown {
+            // An install from the connection dialog happened since Preferences last looked.
+            for installer in &mut self.engine_installers {
+                installer.refresh();
+            }
+        }
+        self.settings_shown = self.settings_open;
         if self.settings_open {
             let mut open = true;
             let before = self.settings.clone();
@@ -749,6 +765,14 @@ impl TablePlusApp {
                         ui.end_row();
                         ui.label("Data directory");
                         ui.label(widgets::muted(ui, self.dir.display().to_string()));
+                        ui.end_row();
+                        ui.label("Engines");
+                        ui.vertical(|ui| {
+                            for installer in &mut self.engine_installers {
+                                installer.poll(ctx);
+                                installer.show_row(ui, &self.spawner);
+                            }
+                        });
                         ui.end_row();
                     });
                 });

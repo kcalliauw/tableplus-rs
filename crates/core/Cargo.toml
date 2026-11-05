@@ -23,6 +23,8 @@ mysql_async = { version = "0.37", default-features = false, features = ["minimal
 rusqlite = { version = "0.40", features = ["bundled", "column_decltype"] }
 russh = { version = "0.64", default-features = false, features = ["ring", "rsa", "flate2"] }
 csv = "1"
+flate2 = "1"
+sha2 = "0.11"
 dirs = "6"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }

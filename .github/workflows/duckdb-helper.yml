@@ -1,0 +1,132 @@
+name: DuckDB helper release
+
+# Builds tableplus-duckdb for each platform CI builds, signs and notarizes the macOS build, and
+# publishes them as a release of this repository. The app only runs a helper whose SHA-256 is in
+# its engine list (crates/core/src/engines.rs); the release notes print the entries to paste there.
+#
+# Run it from the Actions tab with a tag such as duckdb-helper-1.5.6-1, or push that tag.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, for example duckdb-helper-1.5.6-1
+        required: true
+  push:
+    tags: ["duckdb-helper-*"]
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    name: macOS arm64 · build, sign, notarize
+    runs-on: [self-hosted, macOS, ARM64, tableplus]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Signing secrets are set
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          NOTARY_API_KEY_P8: ${{ secrets.NOTARY_API_KEY_P8 }}
+          NOTARY_API_KEY_ID: ${{ secrets.NOTARY_API_KEY_ID }}
+          NOTARY_API_ISSUER_ID: ${{ secrets.NOTARY_API_ISSUER_ID }}
+        run: |
+          missing=""
+          for name in MACOS_CERTIFICATE_P12 MACOS_CERTIFICATE_PASSWORD MACOS_SIGN_IDENTITY \
+                      NOTARY_API_KEY_P8 NOTARY_API_KEY_ID NOTARY_API_ISSUER_ID; do
+            [ -n "${!name}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Add these repository secrets to sign and notarize the helper:$missing"
+            exit 1
+          fi
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked -p engine-duckdb --bin tableplus-duckdb
+      - name: Sign
+        env:
+          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/helper-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          echo "$MACOS_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$KEYCHAIN" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/certificate.p12"
+          codesign --force --options runtime --timestamp --keychain "$KEYCHAIN" \
+            --sign "$MACOS_SIGN_IDENTITY" target/release/tableplus-duckdb
+          codesign --verify --strict --verbose=2 target/release/tableplus-duckdb
+      - name: Notarize
+        env:
+          NOTARY_API_KEY_P8: ${{ secrets.NOTARY_API_KEY_P8 }}
+          NOTARY_API_KEY_ID: ${{ secrets.NOTARY_API_KEY_ID }}
+          NOTARY_API_ISSUER_ID: ${{ secrets.NOTARY_API_ISSUER_ID }}
+        run: |
+          printf '%s' "$NOTARY_API_KEY_P8" > "$RUNNER_TEMP/notary.p8"
+          ditto -c -k target/release/tableplus-duckdb "$RUNNER_TEMP/tableplus-duckdb.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/tableplus-duckdb.zip" --wait \
+            --key "$RUNNER_TEMP/notary.p8" --key-id "$NOTARY_API_KEY_ID" --issuer "$NOTARY_API_ISSUER_ID"
+          rm "$RUNNER_TEMP/notary.p8" "$RUNNER_TEMP/tableplus-duckdb.zip"
+      - name: Package
+        run: scripts/package-helper.sh target/release/tableplus-duckdb macos-aarch64 dist
+      - name: Remove the signing keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/helper-signing.keychain-db" 2>/dev/null || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: helper-macos-aarch64
+          path: dist/*
+
+  linux:
+    name: Linux x86_64 · build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked -p engine-duckdb --bin tableplus-duckdb
+      - name: Package
+        run: scripts/package-helper.sh target/release/tableplus-duckdb linux-x86_64 dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: helper-linux-x86_64
+          path: dist/*
+
+  publish:
+    name: Publish the release
+    needs: [macos, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "tableplus-duckdb, the DuckDB helper for tableplus-rs."
+            echo
+            echo "Engine list entries for crates/core/src/engines.rs:"
+            echo
+            echo '```rust'
+            cat dist/*.entry
+            echo '```'
+          } > notes.md
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes-file notes.md dist/*.gz
+          cat notes.md >> "$GITHUB_STEP_SUMMARY"

@@ -4,9 +4,9 @@ use eframe::egui::{self, Color32, CornerRadius, Key, RichText, Sense, Stroke, St
 use tableplus_core::config::{ColorTag, ConnectionConfig, Credentials, DriverKind, EnvTag, SshAuth, SslMode};
 use tableplus_core::driver;
 use tableplus_core::duckdb::{self, DuckDbTarget};
-use tableplus_core::engines;
 use tableplus_core::secrets::{SecretKind, SecretStore};
 
+use crate::engine_panel::Installer;
 use crate::task::{Spawner, Task, poll_slot};
 use crate::theme::{self, palette};
 use crate::welcome::driver_badge;
@@ -29,8 +29,8 @@ pub struct ConnDialog {
     pub config: ConnectionConfig,
     is_new: bool,
     step: Step,
-    /// Engines whose helper program isn't installed, checked when the dialog opens.
-    missing_helpers: Vec<DriverKind>,
+    /// One per engine that runs in a helper program, which may still need installing.
+    installers: Vec<(DriverKind, Installer)>,
     password: String,
     ssh_password: String,
     ssh_passphrase: String,
@@ -55,10 +55,7 @@ impl ConnDialog {
             config,
             is_new,
             step: if is_new { Step::Engine } else { Step::Form },
-            missing_helpers: DriverKind::ALL
-                .into_iter()
-                .filter(|d| d.helper().is_some_and(|e| !engines::is_available(e)))
-                .collect(),
+            installers: DriverKind::ALL.into_iter().filter_map(|d| Some((d, Installer::new(d.helper()?)))).collect(),
             url: String::new(),
             url_error: None,
             test: None,
@@ -122,6 +119,9 @@ impl ConnDialog {
         if let Some(r) = poll_slot(&mut self.test) {
             self.test_result = Some(r.map_err(|e| format!("{e:#}")));
         }
+        for (_, installer) in &mut self.installers {
+            installer.poll(ctx);
+        }
         let mut outcome = DialogOutcome::Open;
         let modal = crate::widgets::modal(ctx, "conn_dialog").show(ctx, |ui| {
             ui.set_width(580.0);
@@ -160,6 +160,15 @@ impl ConnDialog {
                 ui.heading(format!("{verb} {} Connection", self.config.driver.label()));
             });
             ui.add_space(12.0);
+            let driver = self.config.driver;
+            let helper_missing = match self.installers.iter_mut().find(|(d, _)| *d == driver) {
+                Some((_, installer)) if !installer.is_ready() => {
+                    installer.show_panel(ui, spawner);
+                    ui.add_space(12.0);
+                    true
+                }
+                _ => false,
+            };
 
             let label_w = 104.0;
             let row = |ui: &mut Ui, label: &str, add: &mut dyn FnMut(&mut Ui)| {
@@ -364,7 +373,8 @@ impl ConnDialog {
             self.sync_ports();
             ui.horizontal(|ui| {
                 let testing = self.test.is_some();
-                if ui.add_enabled(!testing, egui::Button::new("Test").min_size(vec2(64.0, 26.0))).clicked() {
+                let test = egui::Button::new("Test").min_size(vec2(64.0, 26.0));
+                if ui.add_enabled(!testing && !helper_missing, test).clicked() {
                     let cfg = self.config.clone();
                     let creds = self.credentials();
                     self.test_result = None;
@@ -383,11 +393,12 @@ impl ConnDialog {
                     });
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let valid = if self.config.driver.is_file_based() {
-                        !self.config.path.trim().is_empty()
-                    } else {
-                        !self.config.host.trim().is_empty()
-                    };
+                    let valid = !helper_missing
+                        && if self.config.driver.is_file_based() {
+                            !self.config.path.trim().is_empty()
+                        } else {
+                            !self.config.host.trim().is_empty()
+                        };
                     if widgets::primary_button_enabled(ui, "Connect", valid).clicked() {
                         outcome = DialogOutcome::Save { connect: true };
                     }
@@ -426,9 +437,9 @@ impl ConnDialog {
                     ui.painter().rect(rect, CornerRadius::same(10), fill, stroke, StrokeKind::Inside);
                     let name = ui.painter().layout_no_wrap(d.label().to_string(), theme::bold_font(13.0), p.text);
                     let note =
-                        self.missing_helpers.contains(&d).then(|| d.helper().map(|e| e.size_label)).flatten().map(
-                            |size| ui.painter().layout_no_wrap(size.to_string(), theme::ui_font(11.0), p.text_muted),
-                        );
+                        self.installers.iter().find(|(e, i)| *e == d && !i.is_ready()).map(|(_, i)| {
+                            ui.painter().layout_no_wrap(i.size_label(), theme::ui_font(11.0), p.text_muted)
+                        });
                     let badge = 36.0;
                     let note_h = note.as_ref().map_or(0.0, |n| n.size().y + 2.0);
                     let top = rect.center().y - (badge + 8.0 + name.size().y + note_h) / 2.0;

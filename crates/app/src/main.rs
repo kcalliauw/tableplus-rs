@@ -8,6 +8,7 @@
 mod app;
 mod conn_dialog;
 mod editor;
+mod engine_panel;
 mod export_dialog;
 mod grid;
 mod icons;

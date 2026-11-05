@@ -166,7 +166,12 @@ fn node(object: &Object, scale: Scale) -> Result<PlanNode, String> {
     let empty = Object::new();
     let info = object.get("extra_info").and_then(Json::as_object).unwrap_or(&empty);
     let info_text = |key: &str| info.get(key).and_then(scalar_or_list);
-    node.object = info_text("Table").or_else(|| info_text("Function"));
+    // A file scan names its files; a table function otherwise repeats the operator's name.
+    let files = || {
+        let names = info_text("Filename(s)")?;
+        Some(names.split(", ").map(|f| f.rsplit('/').next().unwrap_or(f)).collect::<Vec<_>>().join(", "))
+    };
+    node.object = info_text("Table").or_else(files).or_else(|| info_text("Function").filter(|f| f != name));
     node.access_type = info_text("Type");
     let conditions: Vec<(&str, String)> = CONDITION_KEYS.iter().filter_map(|k| Some((*k, info_text(k)?))).collect();
     node.condition = match conditions.as_slice() {
@@ -263,6 +268,17 @@ mod tests {
         assert_eq!(plan.estimated_rows(projection), None, "0 above an unestimated sort is a placeholder");
         assert_eq!(plan.node(NodeId::ROOT).actual.unwrap().rows, Some(3.0));
         assert!(plan.attributes.iter().any(|a| a.key == "latency" && a.value == "0.002"));
+    }
+
+    #[test]
+    fn a_file_scan_names_its_file() {
+        let plan = r#"[{"name": "READ_PARQUET", "children": [], "extra_info": {"Function": "READ_PARQUET",
+            "Filename(s)": "/data/orders.parquet", "Estimated Cardinality": "4000"}},
+            {"name": "READ_CSV", "children": [], "extra_info": {"Function": "READ_CSV"}}]"#;
+        let plan = parse(&duckdb(), &result("physical_plan", plan)).unwrap().unwrap();
+        let objects: Vec<Option<&str>> = plan.nodes().skip(1).map(|(_, n)| n.object.as_deref()).collect();
+        assert_eq!(objects, [Some("orders.parquet"), None]);
+        assert!(plan.nodes().skip(1).all(|(id, _)| plan.access(id) == Some(super::super::Access::FullScan)));
     }
 
     #[test]
